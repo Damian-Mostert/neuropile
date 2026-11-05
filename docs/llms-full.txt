@@ -1,0 +1,1974 @@
+# neuropile v0.1.1 - full documentation
+
+> Complete documentation for the neuropile package, concatenated into a
+> single file. This is the "llmsFull" target for agents that want everything
+> in one read.
+
+Package: npmjs.com/package/neuropile
+Repository: git+https://github.com/Damian-Mostert/neuropile.git
+
+---
+
+# getting-started
+
+# Getting started with neuropile
+
+Everything you need to run a brain in under five minutes, then go deeper.
+
+## Install
+
+```bash
+npm install neuropile
+```
+
+Node 18 or newer. That is the only hard requirement.
+
+The package ships a C++17 addon. During `npm install` it tries to compile it
+with `node-gyp`. If no compiler is available it prints a short notice and
+installs a pure-JavaScript fallback instead. Both expose the identical API, so
+your code never needs to care which one is running.
+
+Check which one you got:
+
+```js
+const { nativeAvailable } = require('neuropile');
+console.log(nativeAvailable); // true = C++ addon, false = JS fallback
+```
+
+### If the addon did not build
+
+npm 12 blocks dependency install scripts by default, which includes the
+`node-gyp` build. If `nativeAvailable` is `false`, approve the build script:
+
+```bash
+npm approve-scripts neuropile
+npm rebuild neuropile
+```
+
+Or add it to your own `package.json`:
+
+```json
+{
+  "allowScripts": {
+    "neuropile": true
+  }
+}
+```
+
+## Your first brain
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.1 });
+```
+
+That creates a brain with **154,000 neurons** spread across 16 regions. That
+is a lot of neurons for a first script, and it takes a moment to wire up. For
+anything you are iterating on, use a small brain:
+
+```js
+const brain = new Brain({ sizeGB: 0.01 }); // 15,024 neurons - fast to build
+const brain = new Brain({ neurons: 5000 }); // explicit count
+```
+
+Sizing rules of thumb:
+
+| Want | Use |
+| --- | --- |
+| A quick script or test | `{ neurons: 5000 }` or `{ sizeGB: 0.01 }` |
+| A demo or small agent | `{ sizeGB: 0.05 }` |
+| A full brain | `{ sizeGB: 0.1 }` (154,000 neurons) |
+
+## The core loop
+
+A brain is a simulation. You feed it input, you advance time, you read the
+result.
+
+```js
+const brain = new Brain({ sizeGB: 0.01 });
+
+// 1. Give it input
+brain.hear('the room is cold and quiet');
+
+// 2. Advance time
+brain.tick(5);
+
+// 3. Read the result
+console.log(brain.emotionalState()); // { valence, arousal, drive, ... }
+console.log(brain.behaviorState());  // { curiosity, uncertainty, ... }
+```
+
+`tick(n)` advances the simulation by n steps. Each step runs the spiking
+engine, decays the needs, and updates the neuromodulators.
+
+You do not have to call `tick()` manually. `brain.start(hz)` runs a timer that
+ticks automatically:
+
+```js
+brain.start(10); // ticks at 10 Hz
+// ... later
+brain.stop();
+```
+
+Use manual `tick()` when you want deterministic, step-by-step control. Use
+`start()` when the brain should run continuously alongside your app.
+
+## Feeding it things
+
+There are three ways to put information in.
+
+### Words — `hear()`
+
+```js
+brain.hear('the fire is warm');
+```
+
+`hear()` splits the text into words, hashes each one into a sensory pattern,
+drives the thalamus/sensory/amygdala, activates matching concepts, **and
+stores the whole utterance as an episodic memory**.
+
+That last part surprises people. If you do not want `hear()` to also remember,
+pass `{ remember: false }`.
+
+### Vectors — `perceive()` and `see()`
+
+```js
+brain.perceive([0.2, 0, 0.9]);              // dense sensory vector
+brain.see(new Uint32Array([1, 2, 3, 500])); // sparse visual indices
+```
+
+`perceive()` auto-detects the format: a `Uint32Array`/`Int32Array` is
+treated as sparse neuron indices, a plain array is treated as a dense
+value vector. Pass `{ channel: 'visual' }` to route to the visual region.
+
+### The world — `integrateWorldState()`
+
+This is the richest input. It takes a snapshot of the world and drives the
+appropriate regions.
+
+```js
+brain.integrateWorldState({
+  body: { x: 0.5, y: 0.4, speed: 0.2 },
+  needs: { hunger: 0.3, energy: 0.6, joy: 0.7 },
+  detections: [{ label: 'food', w: 0.8 }],
+  interaction: { note: 'feed', x: 0.5, y: 0.4 },
+});
+```
+
+| Field | Effect |
+| --- | --- |
+| `body` | Position, heading, speed. Drives spatial neurons and border alarm. |
+| `needs` | `hunger`, `energy`, `joy` (0..1). Low needs become distress signals. |
+| `detections` | `{ label, w }` objects. Labels are hashed into visual neurons. |
+| `interaction` | `{ note }` — `feed`, `rest`, `poke`, `danger` are handled specially. |
+| `opticFlow` | `{ x, y, magnitude }` — visual motion. |
+| `motorHint` | `{ x, y, intensity }` — a suggested direction, used by `selfAwareness()`. |
+
+## Memory
+
+```js
+// Store
+brain.remember('the fire is warm and safe', {
+  entities: ['fire', 'warm'],
+  emotion: 'happy',
+  salience: 0.5,
+  type: 'episodic',
+});
+
+// Recall
+const memories = brain.recall(['fire'], { topN: 5 });
+console.log(brain.recallText(['fire'])); // human-readable
+```
+
+Memory types are `'episodic'`, `'semantic'`, `'procedural'`, and
+`'utterance'`.
+
+Recall is **biased by neural reafference**: memories whose encoding pattern
+overlaps with the neurons currently firing come first. This is what makes the
+simulation drive cognition rather than sit next to it. Pass `{ neural: false }`
+to disable it and get purely semantic matching.
+
+Memories do not decay on their own. Call `brain.forget()` to run a decay and
+prune pass.
+
+## Concepts
+
+A concept is a label on an experienced cluster. It accumulates sensory
+features and an emotional vector.
+
+```js
+brain.learn('ember', { bright: 0.9, hot: 0.8 }, { valence: 0.4, arousal: 0.3 }, 'watch', 0.6);
+brain.associate('ember', 'fire', 0.4);
+
+console.log(brain.emotionOf('ember')); // { valence, arousal, approach }
+console.log(brain.activeConcepts(5));
+```
+
+The third argument is the emotional vector, the fourth is an action label,
+and the fifth is the learning strength (0..1).
+
+## Working memory
+
+A small, fast-decaying attention buffer — 7 slots, 12 second lifetime.
+
+```js
+brain.hold('we are talking about fire', ['fire'], 'input');
+brain.focus('fire', ['fire', 'warm'], 'input');
+
+console.log(brain.readWorkingMemory());
+console.log(brain.getFocus());
+```
+
+Source types have different priorities, so the right thing gets evicted
+first: `input` (4) > `answer` (3) > `grounding` (2) > `thought` (1) >
+`self_speech` (0).
+
+Call `brain.rehearse(['fire'])` to keep items alive.
+
+## Beliefs
+
+Beliefs are explicit claims with provenance, kept separate from memories so a
+generated sentence never silently becomes knowledge.
+
+```js
+brain.believe({ topic: 'fire', claim: 'fire is warm', confidence: 0.6 });
+brain.believe({ topic: 'fire', claim: 'fire is warm', source: 'observation', verified: true });
+
+console.log(brain.deliberate('fire'));
+```
+
+`deliberate()` returns `{ topic, evidenceCount, alternatives, concluded,
+conclusion }`. It clusters agreeing claims and only concludes when there is
+verified evidence or agreement from two or more independent sources.
+
+## Reading the brain
+
+### `brain.state()`
+
+The full picture, as a plain object. Keys: `tick`, `native`, `neurons`,
+`maxNeurons`, `growthProgress`, `growthEvents`, `emotion`, `behavior`,
+`motorIntent`, `concepts`, `netEmotion`, `workingMemory`, `focus`,
+`memorySize`, `conceptSize`, `beliefs`, `internal`.
+
+### `brain.context()`
+
+A compact text block built for an LLM prompt. This is the intended way to
+give a language model the brain's state:
+
+```js
+const prompt = `You are a character with this inner state:\n\n${brain.context()}`;
+```
+
+It emits `NEURAL`, `AFFECT`, `BEHAVIOR`, `NEEDS`, `CONCEPTS`,
+`WORKING MEMORY`, `MEMORIES`, and optionally `GENOME LEDGER` and
+`METACOGNITION` lines.
+
+### `brain.emotionalState()` / `brain.behaviorState()`
+
+The affect numbers directly.
+
+- `emotionalState()` → `{ valence, arousal, drive, norepinephrine, needs, body }`
+- `behaviorState()` → `{ valence, arousal, drive, curiosity, uncertainty, actionReadiness, patience, speechReadiness, researchDrive }`
+
+## Moving the brain
+
+The core produces a motor intent, and you decide how to apply it.
+
+```js
+const intent = brain.getMotorIntent(); // { dx, dy, strength }
+```
+
+`dx`/`dy` are a normalized direction, `strength` is 0..1. This is the decoded
+movement signal — use it to drive a character in a game, a robot, or a
+simulated body.
+
+`brain.move(dx, dy, intensity)` moves the brain's internal body and applies
+the corresponding motor pulses.
+
+## Saving and loading
+
+```js
+brain.save('./agent.neuropile');       // gzip-compressed by default
+const clone = new Brain({ sizeGB: 0.01 });
+clone.load('./agent.neuropile');
+
+const snap = brain.snapshot();         // plain in-memory object
+clone.restore(snap);
+```
+
+Async variants exist too: `await brain.saveAsync(path)` and
+`await clone.loadAsync(path)`.
+
+The loader auto-detects gzip by its magic bytes, so compressed and
+uncompressed files are both readable regardless of how they were written.
+
+## Growing a brain
+
+```js
+const brain = new Brain({
+  startNeurons: 20000,
+  maxNeurons: 200000,
+  growthBatch: 1000,
+  growthInterval: 100, // ticks between automatic growth events
+});
+
+brain.tick(100);       // one growth event fires
+console.log(brain.neuronCount); // 20020
+```
+
+New neurons are wired into the circuit the same way the original brain was
+wired, and everything already learned is preserved. Growth is automatic
+whenever `maxNeurons` exceeds the starting size; set `autoGrow: false` for
+manual control with `brain.grow(n)` and `brain.growTo(target)`.
+
+Region sizes round to multiples of 1000, so `startNeurons: 20000` actually
+starts at 19,020 neurons. See [gotchas](gotchas.md#growth-numbers-are-not-exact).
+
+## Next
+
+- [API reference](api.md) — everything exported, with signatures.
+- [Patterns](patterns.md) — copy-paste recipes.
+- [Gotchas](gotchas.md) — what will surprise you.
+- [Concepts](concepts.md) — how the neural model actually works.
+
+---
+
+# api
+
+# API reference
+
+Complete reference for the `neuropile` package. Every export, every method,
+every option.
+
+- [Module exports](#module-exports)
+- [Constructor options](#constructor-options)
+- [`Brain`](#brain)
+  - [Properties](#properties)
+  - [Clock](#clock)
+  - [Perception](#perception)
+  - [Memory](#memory)
+  - [Concepts](#concepts)
+  - [Working memory](#working-memory)
+  - [Beliefs](#beliefs)
+  - [Metacognition and homeostasis](#metacognition-and-homeostasis)
+  - [Growth](#growth)
+  - [Readout](#readout)
+  - [Persistence](#persistence)
+  - [Core passthrough](#core-passthrough)
+- [`BrainCore`](#braincore)
+- [Cognitive layer classes](#cognitive-layer-classes)
+- [Utilities](#utilities)
+- [Types](#types)
+
+---
+
+## Module exports
+
+```js
+const neuropile = require('neuropile');
+```
+
+| Export | Type | Description |
+| --- | --- | --- |
+| `Brain` | class | High-level brain: the core plus every cognitive layer. |
+| `BrainCore` | class | The JavaScript core implementation. |
+| `NativeBrainCore` | class \| null | The native core, or `null` if the addon is unavailable. |
+| `NeuralEngine` | class | The JavaScript spiking engine. |
+| `NativeNeuralEngine` | class \| null | The native engine, or `null` if unavailable. |
+| `MemoryCortex` | class | Associative memory. |
+| `ConceptNet` | class | Word grounding. |
+| `WorkingMemory` | class | Attention buffer. |
+| `Genome` | class | Tunable parameters. |
+| `Metacognition` | class | Self-prediction and self-scoring. |
+| `Homeostasis` | class | Parameter trial-and-error. |
+| `BeliefStore` | class | Explicit claims with provenance. |
+| `createCore(options)` | function | Build a standalone core using the standard selection logic. |
+| `soundPattern(text, size)` | function | Hash text into a sensory pattern of neuron indices. |
+| `labelHash(label)` | function | Deterministic hash used for detection labels. |
+| `persistence` | object | `save`, `load`, `saveAsync`, `loadAsync`, `encodeValue`, `decodeValue`, `toSerializable`, `fromSerializable`. |
+| `save(brain, path, opts)` | function | Shortcut for `persistence.save`. |
+| `load(brain, path)` | function | Shortcut for `persistence.load`. |
+| `nativeAvailable` | boolean | Whether the native addon loaded successfully. |
+| `nativeModule` | object \| null | The raw native module, or `null`. |
+| `nativeError` | Error \| null | The error from the failed load, if any. |
+| `nativePath` | string \| null | Resolved path of the loaded addon, or `null`. |
+| `SENSORY_SIZE` | number | `400000` — default sensory region size. |
+| `PATTERN_LENGTH` | number | `200` — indices per sensory pattern. |
+| `VERSION` | string | The package version. |
+
+ESM: `import { Brain } from 'neuropile';` — every named export above is
+available.
+
+---
+
+## Constructor options
+
+Accepted by `new Brain(options)` and `new BrainCore(options)`.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `sizeGB` | `0.1` | Model size. `0.1` yields 154,000 neurons. `0.01` yields 15,024. |
+| `neurons` | — | Explicit neuron count. Overrides `sizeGB` when greater than 0. |
+| `startNeurons` | — | Initial size. Alias for `neurons` that reads as growth intent. |
+| `maxNeurons` | start size | Hard ceiling on total neurons. Clamped up to the start size, never down. |
+| `autoGrow` | `maxNeurons > start` | Grow automatically during `tick()`. |
+| `growthBatch` | ~1% of start | Neurons added per growth event. |
+| `growthInterval` | `100` | Ticks between automatic growth events. `0` disables the timer. |
+| `growthFanout` | `8` | Synapses wired per direction for each new neuron. |
+| `growthProfile` | object \| array | Per-region growth multipliers. Object is keyed by region name; array is positional. |
+| `synapsesPerNeuron` | `200` | Synapse slots reserved per neuron. |
+| `maxConnections` | `50000` | Maximum sampled connections per wiring rule. |
+| `wire` | `true` | Wire the region graph at construction. |
+| `seed` | — | Deterministic seed for the JavaScript fallback. Makes wiring reproducible. |
+| `native` | `true` | Set `false` to force the JS core even when the addon is built. |
+| `core` | — | Supply a pre-built core instead of constructing one. |
+| `coreOptions` | — | Options forwarded to the core when using the `Brain` wrapper. |
+
+---
+
+## `Brain`
+
+```js
+const brain = new Brain({ sizeGB: 0.1 });
+```
+
+### Properties
+
+All read-only getters.
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `engine` | `NeuralEngine` | The raw engine with the typed-array neuron state. |
+| `regions` | `Region[]` | The 16 regions with `start`, `end`, `size`, `threshold`, `inhibRatio`. |
+| `tickCount` | number | Ticks elapsed. |
+| `valence` | number | Current emotional valence, roughly -1..1. |
+| `arousal` | number | Current arousal. |
+| `drive` | number | Current drive. |
+| `needs` | object | `{ hunger, energy, joy }`, each 0..1. |
+| `body` | object | `{ x, y, heading, speed, energy }`. |
+| `motorState` | object | `{ moveX, moveY, lastAction }`. |
+| `neuronCount` | number | Current neuron count. |
+| `maxNeurons` | number | The growth ceiling. |
+| `canGrow` | boolean | `false` once the ceiling is reached. |
+| `growthProgress` | number | 0..1 toward the ceiling. |
+| `growthEvents` | number | How many growth events have happened. |
+| `native` | boolean | Whether the native core is in use. |
+| `core` | `BrainCore` | The underlying core. |
+| `genome` | `Genome` | The parameter genome. |
+| `memory` | `MemoryCortex` | Associative memory. |
+| `concepts` | `ConceptNet` | Concept store. |
+| `workingMemory` | `WorkingMemory` | Attention buffer. |
+| `metacognition` | `Metacognition` | Self-prediction log. |
+| `homeostasis` | `Homeostasis` | Parameter trial ledger. |
+| `beliefs` | `BeliefStore` | Explicit claims. |
+
+### Clock
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `tick(count = 1)` | number | Advance the simulation. Also advances working memory. Returns the new tick count. |
+| `step(count = 1)` | number | Alias for `tick`. |
+| `start(hz = 10)` | `this` | Start a timer that ticks automatically. The timer is `unref`'d, so it will not hold the process open. |
+| `stop()` | `this` | Stop the automatic timer. |
+
+### Perception
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `perceive(input, options = {})` | `EmotionalState` | Feed a stimulus. A string is treated as words (same as `hear`). A typed array is sparse indices; a plain array is a dense vector. |
+| `hear(text, options = {})` | `EmotionalState` | Hash words into sensory patterns, activate concepts, and store the utterance as an episodic trace. |
+| `see(input)` | `EmotionalState` | Perceive into the visual region. |
+
+`perceive` options: `channel` (`'sensory'`, `'visual'`, `'audio'`),
+`encode` (boolean, also encode into memory), `encodeStrength` (default `0.8`).
+
+`hear` options: `strength` (default `1.0`), `remember` (default `true` — set
+`false` to skip the automatic episodic trace), `entities`, `emotion`,
+`salience` (default `0.45`), `encodeNeural` (default `true`).
+
+### Memory
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `remember(content, options = {})` | `MemoryNode \| undefined` | Store a memory, encode it into the hippocampus, and ground its words as concepts. |
+| `recall(entities = [], options = {})` | `MemoryNode[]` | Recall memories, biased by neural reafference. |
+| `recallFact(keyword)` | `MemoryNode[]` | Recall semantic facts matching a keyword. |
+| `recallText(entities = [], options = {})` | string | Recall and format as human-readable text. |
+| `forget()` | `this` | Run a decay pass on memory and prune concepts. |
+
+`remember` options: `entities` (string[]), `emotion` (default `'neutral'`),
+`salience` (default `0.5`), `dopamine` (default `0`), `type` (default
+`'semantic'`), `turnId` (default `null`), `encodeNeural` (default `true`),
+`consolidate` (boolean), `consolidateStrength` (default `0.5`), `strength`
+(default `0.7`), `concepts` (default `true`), `sensory`, `conceptEmotion`.
+
+`recall` options: `emotion` (default `'neutral'`), `topN` (default `8`),
+`context` (default `'conversation'`), `neural` (default `true` — set `false`
+to disable reafference biasing), `reafferenceTopN` (default `20`).
+
+`recall` also accepts a bare string as the first argument.
+
+### Concepts
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `activate(word, strength = 1.0)` | concept \| null | Activate a concept by label. |
+| `learn(word, sensory = {}, emotion = {}, action = null, strength = 0.5)` | concept \| null | Teach a word a sensory profile and emotional vector. Also grounds it in the neural substrate. |
+| `associate(wordA, wordB, strength = 0.3)` | `EmotionVector \| null` | Link two concepts. |
+| `emotionOf(word)` | `EmotionVector \| null` | `{ valence, arousal, approach }` for a word. |
+| `activeConcepts(topN = 8)` | `ConceptSnapshot[]` | The most active concepts. |
+| `netEmotion()` | `EmotionVector` | The combined emotion of all active concepts. |
+
+### Working memory
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `hold(content, entities = [], type = 'thought', strength = 1.0)` | `this` | Put something in attention. |
+| `focus(topic, entities = [], source = 'thought', strength = 1.0)` | `Focus \| null` | Set the shared focus point. |
+| `getFocus()` | `Focus \| null` | Read the focus. Expires after 12 seconds. |
+| `readWorkingMemory(topN)` | `WorkingMemorySlot[]` | Read the slots, strongest first. |
+| `rehearse(entities = [])` | `this` | Keep matching items alive. |
+
+### Beliefs
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `believe(claim, options = {})` | `Belief \| null` | Record a claim. Also accepts a single object `{ topic, claim, source, confidence, verified }`. |
+| `beliefsAbout(topic, limit = 3)` | `Belief[]` | Recall beliefs about a topic. |
+| `deliberate(topic)` | `Deliberation` | Cluster evidence and report alternatives plus a conclusion. |
+
+`Deliberation` is `{ topic, evidenceCount, alternatives, concluded, conclusion }`.
+
+### Metacognition and homeostasis
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `predict(parsed = {}, reafStrength = 0)` | record | Predict the next internal state before responding. `parsed` is `{ intent, emotion }`. |
+| `observe(record, responseText)` | number | Score the prediction against what happened. Returns a dopamine delta, applied to the core. |
+| `recordTurn(metrics = {})` | string \| null | Record a turn. Evaluates homeostasis every 20 turns and returns a log line when it does. |
+| `tune()` | string \| null | Force a homeostasis evaluation now. |
+
+`recordTurn` metrics: `interrupted`, `recalledSalience`, `goalPushed`,
+`goalResolved`.
+
+### Growth
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `grow(count)` | number | Add up to `count` neurons. Capped by `maxNeurons`. Returns how many were added. |
+| `growTo(target)` | number | Grow toward a total neuron count. Returns how many were added. |
+| `maybeGrow()` | number | Apply one automatic growth step if the cadence allows it. |
+
+### Readout
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `emotionalState()` | `EmotionalState` | `{ valence, arousal, drive, norepinephrine, needs, body }`. |
+| `behaviorState()` | `BehaviorState` | `{ valence, arousal, drive, curiosity, uncertainty, actionReadiness, patience, speechReadiness, researchDrive }`. |
+| `motorIntent()` | `MotorIntent` | `{ dx, dy, strength }` — the decoded movement signal. |
+| `state()` | object | Everything, as one plain object. |
+| `context()` | string | A compact, model-ready text block. |
+
+### Persistence
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `snapshot()` | object | A plain in-memory snapshot. |
+| `restore(snapshot)` | `this` | Restore from a snapshot. |
+| `save(filePath, options)` | string | Write a gzip-compressed snapshot. Returns the resolved path. |
+| `load(filePath)` | object | Load a snapshot and apply it. Returns the snapshot. |
+| `saveAsync(filePath, options)` | `Promise<string>` | Async save. |
+| `loadAsync(filePath)` | `Promise<object>` | Async load. |
+
+`save` options: `compress` (default `true` — set `false` for plain JSON).
+
+### Core passthrough
+
+These are proxied straight to `brain.core`, so they work identically on the
+native and JS cores.
+
+| Method | Returns |
+| --- | --- |
+| `reward(strength = 1.0)` | number — the new dopamine level. |
+| `punish(strength = 1.0)` | number — the new dopamine level. |
+| `setNeeds(needs)` | `Needs` |
+| `getNeeds()` | `Needs` |
+| `getBody()` | `Body` |
+| `getMotorState()` | `MotorState` |
+| `move(dx = 0, dy = 0, intensity = 1.0)` | `Body` |
+| `integrateWorldState(state = {})` | `EmotionalState` |
+| `handleInteraction(kind, intensity = 1.0)` | `Needs` |
+| `amygdalaActivate(threatLevel = 0.5)` | number |
+| `startle(strength = 1.0)` | void |
+| `decideBehavior(options = {})` | `BehaviorDecision` |
+| `actionSelection()` | void |
+| `novelty()` | number |
+| `reafference(topN = 20)` | `{ indices, strength }` |
+| `selfAwareness()` | number |
+| `getMotorIntent()` | `MotorIntent` |
+| `readInternalState()` | `Record<string, number>` — `Ω1`..`Ω5`, `Ω_acc`, `Ω_bg`, `Ω_hypo`, `Ω_da`, `Ω_ne`. |
+| `neuronMap()` | `Record<string, { mean, peak, firing }>` — one entry per region. |
+| `thought()` | `Float32Array` — the association region's activation. |
+| `perceiveDense(values)` | void |
+| `perceiveVisual(input)` | void |
+| `hearDense(values)` | void |
+| `encode(input, strength = 1.0)` | void — encodes into the hippocampus. |
+| `encodeDense(values, strength = 1.0)` | void |
+| `consolidate(input, strength = 1.0)` | void — encodes into the temporal cortex. |
+| `consolidateDense(values, strength = 1.0)` | void |
+| `motorQuadrantSize()` | number |
+| `region(name)` | `Region \| null` |
+
+---
+
+## `BrainCore`
+
+The spiking substrate on its own, without the cognitive layers. Use it when
+you want raw neural dynamics.
+
+```js
+const { BrainCore } = require('neuropile');
+const core = new BrainCore({ neurons: 50000, seed: 42 });
+```
+
+It has every method in [Core passthrough](#core-passthrough) plus:
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `tick(count = 1)` | number | Advance the simulation. |
+| `start(hz = 10)` / `stop()` | `this` | Automatic ticking. |
+| `snapshot()` / `restore(snapshot)` | object / `this` | Persistence. |
+| `grow` / `growTo` / `maybeGrow` | number | Neurogenesis. |
+| `perceive` / `perceiveDense` / `perceiveVisual` / `hear` / `hearDense` | void | Raw input. |
+| `encode` / `encodeDense` / `consolidate` / `consolidateDense` | void | Raw memory encoding. |
+
+Properties: `engine`, `regions`, `options`, `tickCount`, `valence`, `arousal`,
+`drive`, `needs`, `body`, `motorState`, `neuronCount`, `maxNeurons`,
+`canGrow`, `growthProgress`, `growthEvents`.
+
+### `decideBehavior(options)`
+
+```js
+core.decideBehavior({
+  activeGoal: { urgency: 0.8 },
+  humanPresent: true,
+  pendingSelfSpeech: true,
+  tickCount: 120,
+  lastSpokeTick: 0,
+});
+```
+
+Returns the behavior state plus `canSpeak`, `shouldResearch`, `shouldAct`,
+and `responseMode` (`'grounded'`, `'speak'`, or `'quiet'`).
+
+### `integrateWorldState(state)`
+
+| Field | Type | Effect |
+| --- | --- | --- |
+| `body` | `{ x, y, heading, speed, vx, vy }` | Spatial neurons, border alarm, motion signal. |
+| `needs` | `{ hunger, energy, joy }` | Drive signals; low needs trigger distress and pain. |
+| `detections` | `[{ label, w }]` | Labels are hashed into visual neurons. Salient labels (`self`, `violet-glow`, `cyan-light`, `warm-glow`) also reward. |
+| `interaction` | `{ note, x, y, hungerLevel }` | `feed`, `poke`, `aversive`, `danger`, and `food` notes get special handling. |
+| `opticFlow` | `{ x, y, magnitude }` | Visual motion into the visual quadrant system. |
+| `motorHint` | `{ x, y, intensity, hintMode }` | A suggested direction, consumed by `selfAwareness()`. |
+
+### `handleInteraction(kind, intensity = 1.0)`
+
+Recognised kinds: `feed`, `rest`, `play`, `poke`, `danger`. Anything else is
+treated as mildly aversive.
+
+---
+
+## Cognitive layer classes
+
+Each layer can be used standalone.
+
+### `MemoryCortex`
+
+```js
+const { MemoryCortex, Genome } = require('neuropile');
+const memory = new MemoryCortex(new Genome());
+```
+
+| Method | Returns |
+| --- | --- |
+| `encode(content, entities, emotion, salience, dopamine, type, turnId)` | `MemoryNode \| undefined` |
+| `recall(entities, emotion, topN, context)` | `MemoryNode[]` |
+| `recallByReafference(neuralIndices, entities, emotion, topN, context)` | `MemoryNode[]` |
+| `recallFact(keyword)` | `MemoryNode[]` |
+| `format(memories)` | string |
+| `decay()` | void |
+| `snapshot()` / `restore(snapshot)` | object / `this` |
+
+Property: `size` (node count), `nodes` (the array).
+
+### `ConceptNet`
+
+| Method | Returns |
+| --- | --- |
+| `activate(word, strength, hopDepth)` | concept \| null |
+| `learn(word, sensory, emotion, action, strength)` | concept \| null |
+| `associate(wordA, wordB, strength)` | void |
+| `emotionOf(word)` | `EmotionVector \| null` |
+| `activeConceptsSnapshot(topN)` | `ConceptSnapshot[]` |
+| `formatForLLM()` | string \| null |
+| `netEmotion()` | `EmotionVector` |
+| `prune()` | void |
+
+### `WorkingMemory`
+
+| Method | Returns |
+| --- | --- |
+| `hold(content, entities, type, strength)` | void |
+| `setFocus(topic, entities, source, strength)` | `Focus \| null` |
+| `getFocus()` / `clearFocus()` | `Focus \| null` / void |
+| `rehearse(entities)` | void |
+| `tick()` | void — expires old slots. |
+| `read(topN)` | `WorkingMemorySlot[]` |
+| `format()` | string |
+| `flush()` | void |
+
+### `Genome`
+
+| Method | Returns |
+| --- | --- |
+| `get(key)` | number \| null |
+| `set(key, value)` | boolean — false if the key is unknown. Clamps to bounds. |
+| `meta(key)` | `{ value, min, max, step } \| null` |
+| `snapshot()` / `restore(snapshot)` | `Record<string, number>` / void |
+| `keys()` | string[] |
+
+Parameters: `metacognition_lr`, `emotion_cue`, `novelty_cue`, `arousal_cue`,
+`drive_cue`, `salience_emotion_bonus`, `salience_entity_weight`,
+`ne_interrupt_threshold`, `memory_decay_rate`, `memory_consolidate_boost`,
+`memory_prune_threshold`.
+
+### `Metacognition`
+
+| Method | Returns |
+| --- | --- |
+| `predict(neuralState, parsed, reafStrength)` | record |
+| `observe(record, neuralStateAfter, responseText)` | number — dopamine delta |
+| `recentAccuracy()` | number \| null |
+| `summary()` | `MetacognitionSummary \| null` |
+
+### `Homeostasis`
+
+| Method | Returns |
+| --- | --- |
+| `recordTurn(metrics)` | void |
+| `evaluate()` | string \| null — a log line describing the trial. |
+| `ledgerSummary(n)` | string \| null |
+
+Property: `ledger` — an array of trial records.
+
+### `BeliefStore`
+
+| Method | Returns |
+| --- | --- |
+| `record({ topic, claim, source, confidence, verified })` | `Belief \| null` |
+| `recall(topic, limit)` | `Belief[]` |
+| `best(topic)` | `Belief \| null` |
+| `deliberate(topic)` | `Deliberation` |
+
+Property: `items` — the array of beliefs.
+
+---
+
+## Utilities
+
+### `createCore(options)`
+
+Builds a standalone `BrainCore`, choosing the native or JS implementation
+with the same logic `Brain` uses.
+
+```js
+const { createCore } = require('neuropile');
+const core = createCore({ startNeurons: 50000, native: false });
+```
+
+### `soundPattern(text, size = 400000)`
+
+Hashes text into a `Uint32Array` of 200 neuron indices. A djb2 hash
+(`h = 5381`, `h = h * 31 ^ charCode`) spread with
+`(h ^ j) * 2654435761 % size`. Results are cached, so repeated words are free.
+
+### `labelHash(label)`
+
+A deterministic 32-bit hash of a lowercase label. Used to place detection
+labels into the visual region consistently.
+
+### `persistence`
+
+```js
+const { persistence } = require('neuropile');
+
+persistence.save(brain, './agent.neuropile');
+persistence.save(brain, './agent.json', { compress: false });
+const snapshot = persistence.load(brain, './agent.neuropile');
+```
+
+Async variants, inside an async function:
+
+```js
+await persistence.saveAsync(brain, './agent.neuropile');
+await persistence.loadAsync(brain, './agent.neuropile');
+```
+
+`encodeValue` and `decodeValue` preserve typed arrays, `Map`, `Set`, and
+`BigInt` through JSON. `toSerializable` and `fromSerializable` wrap a
+snapshot in the on-disk envelope.
+
+---
+
+## Types
+
+Full TypeScript definitions are bundled in `index.d.ts` and are picked up
+automatically.
+
+```ts
+import { Brain, BrainOptions, EmotionalState, BehaviorState } from 'neuropile';
+
+const options: BrainOptions = { sizeGB: 0.05, maxNeurons: 200000 };
+const brain = new Brain(options);
+const emotion: EmotionalState = brain.emotionalState();
+```
+
+---
+
+# patterns
+
+# Patterns
+
+Copy-paste recipes for common tasks. Each one is complete and runnable.
+
+- [Give a language model the brain's state](#give-a-language-model-the-brains-state)
+- [A chat character with memory](#a-chat-character-with-memory)
+- [A game agent that acts on its own](#a-game-agent-that-acts-on-its-own)
+- [An HTTP service over a brain](#an-http-service-over-a-brain)
+- [A character that learns words](#a-character-that-learns-words)
+- [A character with opinions](#a-character-with-opinions)
+- [Growing a brain over time](#growing-a-brain-over-time)
+- [Persistent agents](#persistent-agents)
+- [Embedding in an existing app](#embedding-in-an-existing-app)
+- [Testing](#testing)
+
+---
+
+## Give a language model the brain's state
+
+The core integration. `brain.context()` returns a compact text block built to
+sit in a prompt.
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.05 });
+
+async function respond(userText, llm) {
+  brain.hear(userText);
+  brain.hold(userText, userText.toLowerCase().split(/\s+/), 'input');
+  brain.focus(userText, userText.toLowerCase().split(/\s+/), 'input');
+  brain.tick(2);
+
+  const context = brain.context();
+  const reply = await llm({
+    system: `You are a character with an inner life. Here is your state:\n\n${context}`,
+    user: userText,
+  });
+
+  // Let the brain react to what was said back to it.
+  const record = brain.predict({ intent: 'response', emotion: 'neutral' }, 0.5);
+  brain.observe(record, reply);
+  brain.recordTurn({ recalledSalience: 0.4 });
+
+  return reply;
+}
+```
+
+`context()` emits these lines:
+
+```
+NEURAL tick=5 native=true neurons=154000/154000
+AFFECT valence=0.123 arousal=0.074 drive=0.029 ne=0.000
+BEHAVIOR curiosity=0.37 uncertainty=0.28 action=0.04 speech=0.04
+NEEDS hunger=0.50 energy=0.50 joy=0.50
+CONCEPTS warm:0.68 friend:0.53
+WORKING MEMORY
+[thought] we are talking about fire
+MEMORIES
+(nothing relevant recalled)
+```
+
+Two optional lines appear when there is data: `GENOME LEDGER` (recent
+homeostasis trials) and `METACOGNITION` (recent prediction accuracy).
+
+---
+
+## A chat character with memory
+
+The key is that recall is biased by what the brain is currently thinking about,
+so it remembers the relevant thing without you doing any retrieval work.
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.05 });
+brain.start(10); // ticks at 10 Hz in the background
+
+function chat(userText) {
+  brain.hear(userText, { salience: 0.6 });
+  brain.hold(userText, userText.toLowerCase().split(/\s+/), 'input');
+  brain.focus(userText, userText.toLowerCase().split(/\s+/), 'input');
+
+  const memories = brain.recall(['topic'], { topN: 5 });
+  const concepts = brain.activeConcepts(5);
+  const emotion = brain.emotionalState();
+
+  return { memories, concepts, emotion };
+}
+```
+
+Note `brain.hear()` already stores the utterance as an episodic memory, so
+you do not need a separate `remember()` call for conversation.
+
+---
+
+## A game agent that acts on its own
+
+The brain produces a motor intent. You decide what to do with it.
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.01 });
+
+let body = { x: 0.5, y: 0.5, heading: 0, speed: 0 };
+let food = { x: 0.3, y: 0.4 };
+
+function step() {
+  // Tell the brain what it perceives.
+  brain.integrateWorldState({
+    body,
+    needs: brain.getNeeds(),
+    detections: [{ label: 'food', w: 1 - Math.hypot(body.x - food.x, body.y - food.y) }],
+  });
+
+  // Read the brain's intent.
+  const intent = brain.getMotorIntent();
+
+  // Apply it (with a little steering so it does not get stuck).
+  const dx = intent.dx * intent.strength + (food.x - body.x) * 0.12;
+  const dy = intent.dy * intent.strength + (food.y - body.y) * 0.12;
+  const mag = Math.hypot(dx, dy) || 1;
+
+  brain.move(dx / mag, dy / mag, 0.7);
+  body = brain.getBody();
+
+  if (Math.hypot(body.x - food.x, body.y - food.y) < 0.05) {
+    brain.handleInteraction('feed', 1.0);
+    food = { x: Math.random(), y: Math.random() };
+  }
+
+  brain.tick(1);
+}
+```
+
+`handleInteraction('feed')` raises hunger satisfaction and rewards the brain,
+which is what makes the association between food and good outcomes form.
+
+Recognised interaction kinds: `feed`, `rest`, `play`, `poke`, `danger`.
+
+---
+
+## An HTTP service over a brain
+
+```js
+const http = require('node:http');
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.01 });
+brain.start(10);
+
+const server = http.createServer(async (req, res) => {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
+
+  const send = (data) => {
+    const payload = JSON.stringify(data);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(payload);
+  };
+
+  if (req.url === '/state') return send(brain.state());
+  if (req.url === '/context') return send({ context: brain.context() });
+
+  if (req.url === '/perceive') {
+    brain.hear(body.text || '');
+    brain.tick(2);
+    return send({ emotion: brain.emotionalState(), concepts: brain.activeConcepts(6) });
+  }
+
+  if (req.url === '/recall') {
+    const memories = brain.recall(body.entities || [], { topN: 8 });
+    return send({ memories });
+  }
+
+  send({ error: 'not found' });
+});
+
+server.listen(8787);
+```
+
+A fuller version is in `examples/http-server.js`, with routes for `/state`,
+`/context`, `/perceive`, `/remember`, `/recall`, `/learn`, `/believe`,
+`/step`, `/interact`, and `/save`.
+
+---
+
+## A character that learns words
+
+```js
+// Teach a word a sensory profile and how it feels.
+brain.learn('ember', { bright: 0.9, hot: 0.8 }, { valence: 0.4, arousal: 0.3 }, 'watch', 0.6);
+
+// Link it to another word.
+brain.associate('ember', 'fire', 0.4);
+
+// Later, ask how it feels.
+brain.emotionOf('ember');   // { valence, arousal, approach }
+brain.activeConcepts(5);   // the most active concepts
+brain.netEmotion();         // combined emotion of active concepts
+```
+
+The `learn()` arguments are: word, sensory features, emotion vector, action
+label, and strength. `learn()` also grounds the word in the neural substrate,
+so it is not only a table lookup.
+
+---
+
+## A character with opinions
+
+Beliefs are separate from memories on purpose, so a generated sentence never
+quietly becomes knowledge.
+
+```js
+// Record a claim.
+brain.believe({ topic: 'fire', claim: 'fire is warm', confidence: 0.6 });
+
+// Record the same claim from an observation, and mark it verified.
+brain.believe({ topic: 'fire', claim: 'fire is warm', source: 'observation', verified: true });
+
+// Ask what the brain thinks.
+const verdict = brain.deliberate('fire');
+// {
+//   topic: 'fire',
+//   evidenceCount: 2,
+//   alternatives: [{ claim: 'fire is warm', sources: ['observation','internal'], confidence: 0.425, verified: true }],
+//   concluded: true,
+//   conclusion: { claim: 'fire is warm', verified: true, sources: ['observation','internal'] }
+// }
+```
+
+A conclusion requires verified evidence, or agreement from two or more
+independent sources. One unverified claim is not enough.
+
+`brain.beliefsAbout('fire')` returns the raw belief list.
+
+---
+
+## Growing a brain over time
+
+```js
+const brain = new Brain({
+  startNeurons: 20000,
+  maxNeurons: 200000,
+  growthBatch: 1000,
+  growthInterval: 100, // ticks between automatic growth events
+  growthProfile: {
+    hippocampus: 4, // grow memory capacity faster
+    association: 3,
+    motor: 0.2, // barely grow the motor system
+  },
+});
+
+brain.tick(100); // one growth event fires
+brain.neuronCount; // 20020
+```
+
+Manual control:
+
+```js
+brain.grow(500);        // add up to 500 neurons
+brain.growTo(50000);    // grow toward a total
+brain.maybeGrow();      // one automatic step, if the cadence allows
+brain.canGrow;          // false at the ceiling
+brain.growthProgress;   // 0..1
+```
+
+Everything already learned survives growth — the brain is remapped, not
+rebuilt.
+
+---
+
+## Persistent agents
+
+```js
+// Save.
+const path = brain.save('./agent.neuropile');
+
+// Load into a fresh brain.
+const restored = new Brain({ startNeurons: 20000, maxNeurons: 200000 });
+restored.load('./agent.neuropile');
+restored.neuronCount; // the grown size, not the starting size
+```
+
+The snapshot includes the neural engine, needs, body, memory, concepts,
+working memory, genome, metacognition, beliefs, and the homeostasis ledger.
+
+Plain JSON instead of gzip:
+
+```js
+brain.save('./agent.json', { compress: false });
+```
+
+Async versions: `await brain.saveAsync(path)` and `await restored.loadAsync(path)`.
+
+---
+
+## Embedding in an existing app
+
+Use the core directly if you want the substrate without the cognitive layers.
+
+```js
+const { BrainCore } = require('neuropile');
+
+const core = new BrainCore({ neurons: 50000, seed: 42 });
+
+core.integrateWorldState({ body: { x: 0.5, y: 0.4 }, needs: { hunger: 0.3 } });
+core.tick(10);
+
+core.emotionalState();
+core.getMotorIntent(); // { dx, dy, strength }
+core.readInternalState(); // Ω1..Ω5, Ω_da, Ω_ne
+```
+
+Use `createCore(options)` to get the same core the `Brain` wrapper would have
+built, including the native/JS selection logic.
+
+---
+
+## Testing
+
+Use a small brain and a fixed seed. The JS fallback is deterministic with a
+seed.
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ neurons: 2000, seed: 42, native: false });
+
+brain.remember('the fire is warm', { entities: ['fire'] });
+brain.tick(5);
+
+assert.equal(brain.memory.size, 1);
+assert.ok(brain.recall(['fire']).length > 0);
+```
+
+Use `{ native: false }` when you want to test the JavaScript path
+specifically. The test suite in this repo runs every behaviour against both
+implementations and asserts they agree.
+
+For fast tests, `neurons: 2000` is enough. For a realistic feel, `sizeGB:
+0.01`.
+
+---
+
+# gotchas
+
+# Gotchas
+
+The behaviours that surprise people. Read this before debugging something that
+"should" have worked.
+
+- [Growth numbers are not exact](#growth-numbers-are-not-exact)
+- [`hear()` also remembers](#hear-also-remembers)
+- [Memories do not decay on their own](#memories-do-not-decay-on-their-own)
+- [`recall()` prefers what is firing right now](#recall-prefers-what-is-firing-right-now)
+- [`believe()` takes two different shapes](#believe-takes-two-different-shapes)
+- [The native addon may not have built](#the-native-addon-may-not-have-built)
+- [`context()` is data, not prose](#context-is-data-not-prose)
+- [Working memory is only seven slots](#working-memory-is-only-seven-slots)
+- [Calls have side effects on needs](#calls-have-side-effects-on-needs)
+- [Growth reallocates the whole engine](#growth-reallocates-the-whole-engine)
+- [The brain is stochastic without a seed](#the-brain-is-stochastic-without-a-seed)
+- [Typing is a string, not a number](#typing-is-a-string-not-a-number)
+
+---
+
+## Growth numbers are not exact
+
+Region sizes are rounded to multiples of 1000, so the real neuron count is
+never exactly what you asked for.
+
+```js
+const brain = new Brain({ startNeurons: 20000, maxNeurons: 200000 });
+brain.neuronCount; // 19020, not 20000
+```
+
+The default `growthBatch` is ~1% of the **actual** start, so:
+
+```js
+const brain = new Brain({ startNeurons: 20000, maxNeurons: 200000 });
+brain.tick(100);
+brain.neuronCount; // 19210 (19020 + 190), not 20020
+```
+
+To land on an exact number, set `growthBatch` explicitly:
+
+```js
+const brain = new Brain({
+  startNeurons: 20000,
+  maxNeurons: 200000,
+  growthBatch: 1000,
+});
+brain.tick(100);
+brain.neuronCount; // 20020
+```
+
+Likewise `sizeGB: 0.1` gives 154,000 neurons and `sizeGB: 0.01` gives 15,024.
+Neither is a round number.
+
+**Do not assert exact neuron counts** unless you have set `growthBatch`
+explicitly. Assert ranges, or compare relative growth.
+
+---
+
+## `hear()` also remembers
+
+`hear()` is not just input. It hashes the words into sensory patterns,
+activates matching concepts, **and stores the whole utterance as an episodic
+memory**.
+
+```js
+brain.hear('hello');
+brain.memory.size; // 1
+```
+
+If you want input without the memory side effect:
+
+```js
+brain.hear('hello', { remember: false });
+```
+
+This matters if you are counting memories, or if the user utterance should
+not become a memory the character can later recall out of context.
+
+---
+
+## Memories do not decay on their own
+
+Nothing decays until you call `forget()`.
+
+```js
+brain.remember('something', { entities: ['x'] });
+brain.tick(1000);
+brain.memory.size; // still 1 — no decay happened
+```
+
+Decay and pruning happen in `brain.forget()`:
+
+```js
+brain.forget();       // decays memory and prunes concepts
+```
+
+`forget()` is a single pass, so call it on a schedule if you want continuous
+decay:
+
+```js
+setInterval(() => brain.forget(), 60_000);
+```
+
+Memory types decay at different rates: episodic fastest, semantic slowest.
+Utterances decay very slowly.
+
+---
+
+## `recall()` prefers what is firing right now
+
+Recall is biased by neural reafference — the neurons currently firing push
+matching memories to the front. This is deliberate, and it is the main reason
+the simulation drives cognition.
+
+The consequence: **the same query can return different results depending on
+the brain's internal state.**
+
+```js
+brain.remember('the fire is warm', { entities: ['fire'] });
+brain.recall(['fire']); // may be empty if nothing neural matches
+```
+
+If you need deterministic semantic matching:
+
+```js
+brain.recall(['fire'], { neural: false });
+```
+
+Note that `recall([])` with no entities returns nothing. Use
+`{ topN: 5 }` with an empty query only if you want the reafference-only
+selection, which is what `brain.context()` does internally.
+
+---
+
+## `believe()` takes two different shapes
+
+The method accepts a claim string or a full object.
+
+```js
+// String form - the topic must come from options.
+brain.believe('fire is warm', { topic: 'fire', confidence: 0.6 });
+
+// Object form - everything inline.
+brain.believe({ topic: 'fire', claim: 'fire is warm', confidence: 0.6 });
+```
+
+The string form with no `topic` returns `null` and records nothing.
+
+Two independent sources agreeing on the same claim are treated as evidence,
+not a duplicate. Recording the same claim twice from the same source raises
+confidence instead of adding a second entry.
+
+---
+
+## The native addon may not have built
+
+```js
+const { nativeAvailable } = require('neuropile');
+nativeAvailable; // false means the JS fallback is in use
+```
+
+This is not an error — the JS fallback has the same API. But it is roughly
+10x slower under heavy load, and it is the first thing to check if the brain
+feels sluggish.
+
+Common causes:
+
+- No C++17 compiler installed.
+- npm 12 blocking install scripts by default.
+
+```bash
+npm approve-scripts neuropile
+npm rebuild neuropile
+```
+
+`require('neuropile').nativeError` holds the actual load error if you need
+it.
+
+---
+
+## `context()` is data, not prose
+
+`brain.context()` returns structured lines meant to be parsed and embedded.
+It is not a paragraph and it does not address the user.
+
+```
+AFFECT valence=0.123 arousal=0.074 drive=0.029 ne=0.000
+```
+
+If you want natural language, generate it. Feed `context()` to a model and
+ask it to describe the character's feelings in character.
+
+Do not concatenate `context()` directly into a prompt without a delimiter
+between it and the user's input, or the model may blur the two together.
+
+---
+
+## Working memory is only seven slots
+
+Capacity is 7, hard-coded. Anything past that evicts the weakest slot.
+
+```js
+for (let i = 0; i < 20; i++) brain.hold(`item ${i}`, [`e${i}`], 'thought');
+brain.workingMemory.size; // 7
+```
+
+Eviction is by source priority first, then by strength:
+
+| Source | Priority |
+| --- | --- |
+| `input` | 4 |
+| `answer` | 3 |
+| `grounding` | 2 |
+| `thought` | 1 |
+| `self_speech` | 0 |
+
+Slots expire after 12 seconds of wall-clock time, not ticks. `rehearse()`
+extends them.
+
+---
+
+## Calls have side effects on needs
+
+Reading state is not always free of side effects.
+
+`brain.emotionalState()` calls `_tickNeeds()` internally, which decays
+hunger, energy, and joy. `brain.behaviorState()` calls `emotionalState()`, so
+it does too.
+
+If you poll `emotionalState()` in a tight loop, the brain will get hungry
+much faster than if you only tick it occasionally.
+
+Similarly, `brain.move()` consumes energy and reduces joy. `brain.tick(n)`
+decays needs n times.
+
+If you want a stable read, use `brain.valence` / `brain.arousal` /
+`brain.drive` — those are plain getters with no side effects.
+
+---
+
+## Growth reallocates the whole engine
+
+Growth is not incremental. It builds a new engine, remaps every neuron and
+synapse into it, and swaps it in.
+
+```js
+const brain = new Brain({ startNeurons: 20000, maxNeurons: 200000 });
+brain.tick(100); // one growth event — full reallocation
+```
+
+It is cheap at small sizes but not free. For a large brain, prefer fewer,
+bigger growth events:
+
+```js
+{ growthBatch: 5000, growthInterval: 100 }
+```
+
+over many small ones.
+
+Learned state is preserved: potentials, thresholds, and synapse weights all
+survive the remap.
+
+---
+
+## The brain is stochastic without a seed
+
+Wiring, growth distribution, and concept activation all use randomness.
+
+```js
+const a = new Brain({ startNeurons: 5000, native: false });
+const b = new Brain({ startNeurons: 5000, native: false });
+// different wiring, different results
+```
+
+For reproducible behaviour, set a seed:
+
+```js
+const brain = new Brain({ startNeurons: 5000, seed: 42, native: false });
+```
+
+The seed applies to the JavaScript fallback. The native core uses its own
+generator, so only use seeds when you have forced `native: false` and are
+testing the JS path.
+
+---
+
+## Typing is a string, not a number
+
+Memory types are strings.
+
+```js
+brain.remember('x', { type: 'episodic' });   // correct
+brain.remember('x', { type: 3 });             // wrong — not a valid type
+```
+
+Valid values are `'episodic'`, `'semantic'`, `'procedural'`, and
+`'utterance'`.
+
+The same applies to emotion names, working memory source types, and belief
+sources — they are all free-form strings, but some are checked for special
+behaviour:
+
+- **Emotion**: `'neutral'`, `'happy'`, `'upset'` are read by the
+  metacognitive predictor. Other strings are treated as neutral.
+- **Interaction kind**: `'feed'`, `'rest'`, `'play'`, `'poke'`, `'danger'`
+  have specific effects. Anything else is mildly aversive.
+- **Belief source**: any string. `'observation'` and `'internal'` are
+  conventions.
+
+---
+
+## Other things worth knowing
+
+- **`brain.tick()` also advances working memory**, so slots expire on the
+  same clock as the neurons.
+- **`start()` timers are `unref`'d**, so they will not keep your process
+  alive. Call `stop()` when you are done anyway.
+- **`brain.core.engine`** gives you the raw typed arrays. On the native core
+  these point directly at C++ memory and stay valid while the core is alive.
+- **`soundPattern()` caches by text**, so hashing the same word repeatedly is
+  free.
+- **`maxNeurons` is clamped up** to the starting size, never down. Setting
+  `maxNeurons` below the start size does not shrink the brain.
+
+---
+
+# concepts
+
+# Concepts
+
+How the brain actually works. You do not need this to use the package, but
+it explains why the API behaves the way it does.
+
+- [The shape of the system](#the-shape-of-the-system)
+- [The spiking engine](#the-spiking-engine)
+- [The 16 regions](#the-16-regions)
+- [Wiring](#wiring)
+- [Affect](#affect)
+- [Needs and the body](#needs-and-the-body)
+- [Motor intent](#motor-intent)
+- [Reafference](#reafference)
+- [Memory](#memory)
+- [Concepts](#concepts)
+- [Beliefs](#beliefs)
+- [Metacognition and homeostasis](#metacognition-and-homeostasis)
+- [Growth](#growth)
+
+---
+
+## The shape of the system
+
+```
+sensory / vision / audio
+        │
+        ▼
+  BrainCore (C++ or JS)  ── spiking neurons, 16 regions, dopamine/NE
+        │
+        ├── emotionalState / behaviorState / motorIntent
+        │
+        ├── MemoryCortex      associative, decaying, reafference-biased
+        ├── ConceptNet        sensory + emotional grounding of words
+        ├── WorkingMemory     7 attention slots + shared focus
+        ├── Genome            tunable personality/plasticity parameters
+        ├── Metacognition     predicts, scores, adapts its own weights
+        ├── Homeostasis       proposes genome trials, accepts or reverts
+        └── BeliefStore       explicit claims with provenance
+```
+
+Two things are worth noticing.
+
+**The split is deliberate.** Everything below `BrainCore` is pure JavaScript.
+You can replace or extend the cognitive layers without recompiling the
+native addon.
+
+**The arrow goes both ways.** The core does not just sit under the cognitive
+layers — the cognitive layers read back from it. `MemoryCortex.recall()` is
+biased by `core.reafference()`, and `Metacognition` writes its error signal
+back as dopamine through `core.reward()` / `core.punish()`. That feedback
+loop is what makes this a brain rather than a database with a mood.
+
+---
+
+## The spiking engine
+
+Neurons are leaky integrate-and-fire units.
+
+| Property | Value |
+| --- | --- |
+| Membrane potential | `Float32Array`, one per neuron |
+| Decay | `0.95` per tick, times a per-neuron `decayRate` |
+| Threshold | Per region, 0.08 to 0.35 |
+| Inhibitory fraction | Per region, 5% to 35% — the first N% of each region |
+| Refractory period | 20 ms |
+| Hebbian rate | 0.012 |
+| Weight decay | 0.002 |
+| Weight bounds | -1.5 to 1.5 |
+| Dopamine decay | 0.96 per tick |
+| Norepinephrine decay | 0.92 per tick |
+
+**Sparse decay** is the key performance trick. Only neurons that have actually
+received input are updated on a tick, tracked in an active list. An idle
+brain costs almost nothing, which is why a mostly-quiet brain is not
+compute-bound.
+
+**Firing** works like this: a neuron whose potential reaches its threshold
+fires, resets to zero, and propagates to its synapse targets. Inhibitory
+neurons propagate a negative weight. Firing is gated by the refractory
+period, so a neuron cannot fire twice within 20 ms.
+
+**Learning is dopamine-gated.** Hebbian strengthening only happens when
+dopamine is outside the ±0.05 band. Otherwise synapses decay.
+
+```js
+brain.reward(0.5);   // dopamine up -> synapses strengthen
+brain.punish(0.5);   // dopamine down -> synapses weaken
+```
+
+This is why reward and punishment change *what the brain learns*, not just
+how it feels.
+
+---
+
+## The 16 regions
+
+Regions are allocated proportionally to a fixed base size, so the brain keeps
+its shape as it changes size.
+
+| Region | Base size | Role |
+| --- | --- | --- |
+| `thalamus` | 80,000 | Relay and gating. Carries body, need, and motion signals. |
+| `hypothalamus` | 50,000 | Drives. Converts need pressure into arousal and drive. |
+| `amygdala` | 40,000 | Valence and threat. Fires on aversive input. |
+| `sensory` | 400,000 | Somatosensory and auditory channel. |
+| `visual` | 100,000 | Visual channel, also used for object detections. |
+| `hippocampus` | 160,000 | Memory encoding target. |
+| `temporal` | 200,000 | Consolidation target — long-term storage. |
+| `association` | 600,000 | Integration, concept grounding, reafference readout. |
+| `prefrontal` | 300,000 | Inhibition, deliberation, self-awareness. |
+| `acc` | 120,000 | Conflict detection. Feeds uncertainty. |
+| `basalGanglia` | 180,000 | Action selection and motor gating. |
+| `motor` | 240,000 | Movement output, in four directional quadrants. |
+| `cerebellum` | 300,000 | Motor refinement and coordination. |
+| `vta` | 20,000 | Dopamine source. |
+| `locusCoeruleus` | 15,000 | Norepinephrine source. |
+| `raphe` | 15,000 | Serotonin / stability source. |
+
+At `sizeGB: 0.1` the scale factor is `0.1 / 1.82`, giving 154,000 neurons
+total.
+
+Read a region at runtime:
+
+```js
+const assoc = brain.core.region('association');
+assoc.start;      // first neuron index
+assoc.end;        // last neuron index
+assoc.size;       // neuron count
+assoc.threshold;  // firing threshold
+assoc.inhibRatio; // inhibitory fraction
+```
+
+---
+
+## Wiring
+
+There is a wiring table of long-range projections between regions. Each entry
+has a density, a minimum weight, and a maximum weight.
+
+```js
+['association', 'hippocampus', 0.7, 0.4, 0.9]
+//  from           to            density  wMin  wMax
+```
+
+At construction, each rule samples `density × source region size` connections
+(capped by `maxConnections`) and gives each a random weight in range.
+
+Within each region, neurons are also wired to each other, so regions are not
+isolated islands.
+
+`maxConnections` (default 50,000) bounds the samples per rule. Lower it to
+build a brain faster, or raise it for a denser connectome.
+
+---
+
+## Affect
+
+Three numbers, all roughly in -1..1, all smoothed over time.
+
+### Valence
+
+How good or bad things feel. Driven by dopamine, minus need pressure, plus
+serotonin stability, minus conflict penalty.
+
+```js
+brain.valence; // -1 (miserable) to 1 (delighted)
+```
+
+### Arousal
+
+How activated the brain is. Driven by sensory and association activity, plus
+hypothalamic pressure.
+
+```js
+brain.arousal; // 0 (calm) to 1 (highly activated)
+```
+
+### Drive
+
+How much the brain wants to act. Driven by hippocampal activity and
+hypothalamic pressure.
+
+```js
+brain.drive;
+```
+
+### Norepinephrine
+
+The alerting signal. It rises when the amygdala detects a threat, and it
+raises thresholds across the sensory and association regions — making the
+brain more sensitive.
+
+```js
+brain.emotionalState().norepinephrine;
+```
+
+### Behavior state
+
+Derived from the three affect numbers plus regional activity.
+
+| Field | Meaning |
+| --- | --- |
+| `curiosity` | Driven by hypothalamic pressure and novelty. |
+| `uncertainty` | Driven by conflict detection in the ACC. |
+| `actionReadiness` | Driven by basal ganglia and VTA. |
+| `patience` | Driven by raphe stability and low arousal. |
+| `speechReadiness` | Whether the brain wants to talk. |
+| `researchDrive` | A blend of curiosity, uncertainty, and pressure. |
+
+`decideBehavior()` combines these into `canSpeak`, `shouldResearch`,
+`shouldAct`, and a `responseMode` of `'grounded'`, `'speak'`, or `'quiet'`.
+
+---
+
+## Needs and the body
+
+Three needs, each 0..1: `hunger`, `energy`, `joy`.
+
+They start at 0.5 and drift down. Low needs generate distress signals in the
+hypothalamus, and hunger below 0.4 produces pain signals and an amygdala
+response.
+
+```js
+brain.getNeeds();          // { hunger, energy, joy }
+brain.setNeeds({ hunger: 0.2 });
+brain.handleInteraction('feed', 1.0);  // reduces hunger, rewards
+```
+
+The body is a position in a unit square, plus heading, speed, and energy.
+
+```js
+brain.getBody(); // { x, y, heading, speed, energy }
+```
+
+`integrateWorldState()` reads the body and needs and turns them into neural
+signals: spatial position relative to centre, distance from the border,
+motion, and need pressure.
+
+---
+
+## Motor intent
+
+The motor region is divided into four quadrants: right, left, down, up.
+
+`getMotorIntent()` samples the mean activation of each quadrant and returns
+the difference between opposing pairs.
+
+```js
+const intent = brain.getMotorIntent();
+// { dx: -0.62, dy: 0.78, strength: 0.41 }
+```
+
+`dx` and `dy` are a normalized direction. `strength` is 0..1, scaled by how
+much of the motor region is active.
+
+The brain does not move itself — it expresses an intent, and your code
+decides what to do with it. `brain.move(dx, dy, intensity)` applies the
+intent to the brain's own body model and fires the corresponding motor and
+cerebellar pulses.
+
+---
+
+## Reafference
+
+Reafference is the brain noticing its own activity — the "correlate of
+action". Here it means: which association neurons are currently firing.
+
+```js
+const reaf = brain.reafference(20);
+reaf.indices;  // the top N association neuron indices
+reaf.strength; // 0..1, how far they deviate from baseline
+```
+
+It is computed by comparing current association potentials against a slow
+moving baseline, then taking the largest deviations.
+
+`MemoryCortex.recallByReafference()` uses this to bias recall: memories
+whose encoding pattern overlaps with currently-firing neurons come first.
+
+```js
+// Inside Brain.recall():
+const reaf = this.core.reafference(20);
+const nodes = this.memory.recallByReafference(reaf.indices, query, emotion, topN, context);
+```
+
+---
+
+## Memory
+
+A memory node holds `content`, `entities`, `emotion`, `salience`,
+`dopamine`, `timestamp`, `accessCount`, `type`, and `turnId`.
+
+Four types, decaying at different rates:
+
+| Type | Decay | Use |
+| --- | --- | --- |
+| `episodic` | Fastest (1.8x) | Things that happened. |
+| `semantic` | Slowest (0.6x) | Facts. |
+| `procedural` | Medium | How to do something. |
+| `utterance` | Very slow | Speech. What `hear()` stores. |
+
+Recall is a blend of three factors:
+
+1. **Entity overlap** — how many of the query's entities the memory has.
+2. **Emotion match** — whether the emotional tone matches.
+3. **Reafference** — whether the neural encoding overlaps with what is
+   firing now.
+
+Salience and recency then affect the ordering.
+
+Decay only happens when you call `brain.forget()`.
+
+---
+
+## Concepts
+
+A concept is a label on an experienced cluster.
+
+```js
+brain.learn('ember', { bright: 0.9, hot: 0.8 }, { valence: 0.4 }, 'watch', 0.6);
+```
+
+The concept accumulates:
+
+- **Sensory features** — a weighted map of feature names to values.
+- **Emotion** — `{ valence, arousal, approach }`, averaged over learnings.
+- **Activation** — how strongly it is currently lit.
+- **Associations** — links to other concepts.
+
+Activation decays over time and is boosted when the word is heard or
+recalled. `activeConcepts()` returns the strongest ones.
+
+`netEmotion()` sums the emotion of all active concepts, which is how a
+character's overall mood shifts toward whatever it has been thinking about.
+
+---
+
+## Beliefs
+
+Beliefs are claims with provenance, kept deliberately separate from memories.
+
+```js
+brain.believe({
+  topic: 'fire',
+  claim: 'fire is warm',
+  source: 'observation',
+  confidence: 0.8,
+  verified: true,
+});
+```
+
+Keeping the roles separate prevents a generated sentence or a repeated
+thought from silently becoming knowledge.
+
+`deliberate()` clusters claims whose text overlaps by token similarity
+(threshold 0.55), then decides whether to conclude:
+
+- **Concluded** if the leading cluster is verified, or has 2+ independent
+  sources and confidence >= 0.45.
+- **Not concluded** otherwise.
+
+The store caps at 500 beliefs, evicting the weakest (unverified, low
+confidence, oldest) first.
+
+---
+
+## Metacognition and homeostasis
+
+### Metacognition
+
+Predicts the next internal state before you respond, then scores itself
+after.
+
+```js
+const record = brain.predict({ intent: 'question', emotion: 'happy' }, 0.6);
+// ... generate a response ...
+const delta = brain.observe(record, 'because fire is warm?');
+```
+
+The prediction is a function of emotion, novelty (from reafference), arousal,
+and drive. The observation compares what was predicted against what actually
+happened, and produces an accuracy score.
+
+The error is fed back as dopamine through `brain.reward()` / `brain.punish()`.
+
+The cue weights adapt. A missed valence prediction raises `emotion_cue`; an
+accurate prediction decays all weights slightly. The log keeps the last 20
+records.
+
+### Homeostasis
+
+Watches a rolling window of 20 turns and looks for the metric that is
+furthest outside its target range.
+
+| Metric | Target |
+| --- | --- |
+| `prediction_accuracy` | 0.55 to 1.0 |
+| `interrupt_rate` | 0.0 to 0.3 |
+| `memory_usefulness` | 0.3 to 1.0 |
+| `goal_resolution_rate` | 0.4 to 1.0 |
+
+When it finds a problem, it proposes **one** small mutation to a genome
+parameter, runs a 10-turn trial, and then accepts the change (if it improved
+by at least 0.02 and did not degrade anything else by more than 0.05) or
+reverts it.
+
+Every trial is written to the ledger, which you can read:
+
+```js
+brain.homeostasis.ledger;
+brain.homeostasis.ledgerSummary(3);
+```
+
+---
+
+## Growth
+
+Neurogenesis adds neurons over time.
+
+**Distribution.** New neurons are apportioned across the 16 regions by
+`base size × growth weight`. The default weights favour the plastic
+regions:
+
+| Region | Weight |
+| --- | --- |
+| `hippocampus` | 3.0 |
+| `association` | 2.6 |
+| `prefrontal` | 2.2 |
+| `temporal` | 1.6 |
+| `sensory` | 1.4 |
+| `visual`, `acc` | 1.2 |
+| `basalGanglia`, `motor`, `cerebellum` | 1.0 |
+| `thalamus` | 0.8 |
+| `amygdala` | 0.7 |
+| `hypothalamus` | 0.4 |
+| `vta` | 0.3 |
+| `locusCoeruleus`, `raphe` | 0.2 |
+
+You can override any of these with `growthProfile`.
+
+**Wiring.** Each newborn neuron gets:
+
+- `growthFanout` (default 8) local recurrent connections in both directions,
+  with weights in 0.1 to 0.5.
+- `growthFanout` connections for each long-range projection the region
+  participates in, using that rule's weight range.
+
+So a grown region keeps its role in the circuit.
+
+**Preservation.** The brain is remapped, not rebuilt. Potentials, thresholds,
+decay rates, inhibitory flags, and learned synapse weights all survive, with
+synapse targets rewritten through the remap table.
+
+**Cadence.** `tick()` calls `maybeGrow()`, which adds a batch if
+`growthInterval` ticks have passed since the last event. Setting
+`growthInterval: 0` disables automatic growth entirely.

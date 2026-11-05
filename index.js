@@ -28,9 +28,6 @@ function loadNative() {
     path.join(__dirname, 'build', 'Release', 'neuropile_core.node'),
     path.join(__dirname, 'build', 'Debug', 'neuropile_core.node'),
     path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`, 'neuropile_core.node'),
-    // Older builds of this addon shipped under the previous name.
-    path.join(__dirname, 'build', 'Release', 'talos_core.node'),
-    path.join(__dirname, 'build', 'Debug', 'talos_core.node'),
   ];
 
   let lastError = null;

@@ -85,37 +85,6 @@ test('uncompressed JSON snapshots still load', () => {
   }
 });
 
-test('legacy talos-brain snapshots still load', () => {
-  const file = tempFile('legacy');
-  try {
-    const brain = new Brain({ neurons: 2000, seed: 23, native: false });
-    brain.remember('a memory from before the rename', { entities: ['legacy'] });
-
-    // Rewrite the payload in the old format, including the old value tag.
-    const payload = persistence.toSerializable(brain.snapshot());
-    payload.format = 'talos-brain';
-    const legacy = JSON.parse(JSON.stringify(payload));
-    const walk = (value) => {
-      if (Array.isArray(value)) return value.forEach(walk);
-      if (value && typeof value === 'object') {
-        if (value.__neuropileType) {
-          value.__talosType = value.__neuropileType;
-          delete value.__neuropileType;
-        }
-        Object.values(value).forEach(walk);
-      }
-    };
-    walk(legacy.data);
-    fs.writeFileSync(file, JSON.stringify(legacy));
-
-    const loaded = new Brain({ neurons: 2000, seed: 24, native: false });
-    loaded.load(file);
-    assert.equal(loaded.memory.size, 1);
-  } finally {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  }
-});
-
 test('async save/load works', async () => {
   const file = tempFile('async');
   try {

@@ -1,9 +1,9 @@
 // neuropile_core.hpp - native C++ substrate for the Neuropile brain.
 //
-// This is a direct port of core/engine.js and the neural/limbic parts of
-// core/brain.js from the Talos project. It keeps the same behaviour and the
-// same public shape, but moves the hot loops (propagation, sparse decay,
-// region sampling, wiring) into C++.
+// This is the C++ implementation of the spiking engine and the neural/limbic
+// core. It keeps the same behaviour and the same public shape as the
+// JavaScript implementation in lib/, but moves the hot loops (propagation,
+// sparse decay, region sampling, wiring) into C++.
 //
 // Everything above the substrate — memory, concepts, working memory, genome,
 // homeostasis, metacognition — lives in JavaScript in lib/. That split keeps
@@ -42,7 +42,7 @@ struct Region {
     uint32_t size = 0;
     float threshold = 1.0f;
     float inhibRatio = 0.0f;
-    // The unscaled Talos base size for this region. Growth is apportioned by
+    // The unscaled base size for this region. Growth is apportioned by
     // baseSize * profileWeight so the brain keeps its shape as it grows.
     uint32_t baseSize = 0;
 };

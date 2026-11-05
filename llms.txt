@@ -1,0 +1,84 @@
+# neuropile
+
+> A native C++ spiking-neuron brain for Node.js. 16 brain regions, a wiring
+> table, neuromodulators, needs, affect, motor intent, associative memory,
+> concepts, working memory, metacognition, homeostasis, and beliefs. The brain
+> can grow new neurons. It works with no compiler (JS fallback) or with a
+> C++17 addon (10x faster under load).
+
+A `Brain` is a simulated brain you can talk to, drive, and grow. It has
+internal state that changes over time: it gets hungry, it learns words, it
+forms beliefs, and it remembers what you told it.
+
+## Install
+
+```bash
+npm install neuropile
+```
+
+Node 18+. The native addon compiles automatically if a C++17 toolchain is
+present; otherwise a pure-JS fallback with the identical API is used.
+
+## Quick start
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.1 }); // 154,000 neurons
+brain.start(10);                           // tick at 10 Hz
+
+brain.hear('hello, warm friend');
+brain.remember('the fire is warm and safe', {
+  entities: ['fire', 'warm'],
+  emotion: 'happy',
+  type: 'episodic',
+});
+
+brain.tick(5);
+console.log(brain.state());   // full state object
+console.log(brain.context()); // compact text block for an LLM prompt
+```
+
+ESM also works: `import { Brain } from 'neuropile';`
+
+## Key concepts
+
+- **Core vs Brain.** `BrainCore` is the spiking substrate alone. `Brain` is
+  the core plus the cognitive layers. Most people want `Brain`.
+- **Two cores, one API.** Native C++ and a pure-JS fallback implement the
+  same methods. `brain.native` tells you which is active.
+- **Tick.** One tick advances the simulation by one step. `tick(n)` advances
+  by n.
+- **Context.** `brain.context()` returns a compact text block designed to be
+  pasted into an LLM prompt. It is data, not prose.
+
+## Docs
+
+- [Getting started](docs/getting-started.md): install, first brain, first
+  tick, how to drive it.
+- [API reference](docs/api.md): every export, every method, every option.
+- [Concepts](docs/concepts.md): the neural model, regions, affect, memory,
+  how the layers couple.
+- [Patterns](docs/patterns.md): copy-paste recipes for common tasks
+  (chat agent, game agent, HTTP service, LLM integration, persistence).
+- [Gotchas](docs/gotchas.md): the mistakes that are easy to make, and what
+  the API actually does.
+- [Full README](README.md): the complete human-readable documentation.
+
+## Examples
+
+Runnable demos live in `examples/`:
+
+```bash
+npm run example:chat    # interactive chat loop
+npm run example:game    # agent wanders, gets hungry, eats
+npm run example:http    # JSON HTTP API on :8787
+npm run example:growth  # neurogenesis demo
+npm run benchmark       # native vs JS comparison
+```
+
+## Optional
+
+- [TypeScript types](index.d.ts) — full type definitions are bundled.
+- [Source on GitHub](https://github.com/Damian-Mostert/neuropile) — issues,
+  releases, and the full source.

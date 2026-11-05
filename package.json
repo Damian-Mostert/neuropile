@@ -38,11 +38,6 @@
       "require": "./index.js",
       "import": "./index.mjs"
     },
-    "./talos-brain": {
-      "types": "./index.d.ts",
-      "require": "./index.js",
-      "import": "./index.mjs"
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -54,6 +49,9 @@
     "binding.gyp",
     "scripts",
     "examples",
+    "docs",
+    "llms.txt",
+    "AGENTS.md",
     "LICENSE",
     "README.md"
   ],
@@ -61,8 +59,10 @@
     "install": "node-gyp rebuild || node scripts/no-native.js",
     "build": "node-gyp rebuild",
     "rebuild": "node-gyp rebuild",
+    "docs": "node scripts/gen-llms-full.js",
     "test": "node --test",
     "test:native": "node --test test/native.test.js",
+    "test:docs": "node scripts/check-doc-examples.js",
     "example:chat": "node examples/chat.js",
     "example:game": "node examples/game-loop.js",
     "example:http": "node examples/http-server.js",
@@ -83,5 +83,7 @@
   "gypfile": true,
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "llms": "./llms.txt",
+  "llmsFull": "./docs/llms-full.txt"
 }

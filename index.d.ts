@@ -44,9 +44,9 @@ export interface Region {
   size: number;
   inhibRatio: number;
   threshold: number;
-  /** Unscaled Talos base size for this region. Used to apportion growth. */
+  /** Unscaled base size for this region. Used to apportion growth. */
   baseSize?: number;
-  /** Unscaled Talos base size for this region (JS core spelling). */
+  /** Unscaled base size for this region (JS core spelling). */
   base?: number;
 }
 

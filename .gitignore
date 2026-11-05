@@ -5,3 +5,10 @@ prebuilds/
 *.log
 .DS_Store
 coverage/
+
+# Saved brain snapshots produced by the examples and doc snippets.
+*.neuropile
+agent.json
+
+# Temp files from the doc example checker.
+.doc-example-*

@@ -95,6 +95,24 @@ if (!fs.existsSync(readmePath)) {
   }
 }
 
+// ── The generated llms-full.txt must match the docs it came from ────────────
+try {
+  const { execFileSync } = require('node:child_process');
+  const before = fs.existsSync(path.join(root, 'docs', 'llms-full.txt'))
+    ? fs.readFileSync(path.join(root, 'docs', 'llms-full.txt'), 'utf8')
+    : null;
+  execFileSync('node', [path.join(root, 'scripts', 'gen-llms-full.js')], {
+    cwd: root,
+    stdio: 'pipe',
+  });
+  const after = fs.readFileSync(path.join(root, 'docs', 'llms-full.txt'), 'utf8');
+  if (before !== after) {
+    warnings.push('docs/llms-full.txt was out of date and has been regenerated. Commit it.');
+  }
+} catch (err) {
+  warnings.push(`could not regenerate docs/llms-full.txt: ${err.message}`);
+}
+
 // ── Report ───────────────────────────────────────────────────────────────────
 if (warnings.length > 0) {
   console.warn('\n  prepublish: warnings');

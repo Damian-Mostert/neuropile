@@ -73,6 +73,19 @@ jobs:
             console.log('JS fallback OK');
           "
 
+      - name: Check the AI docs are in sync
+        run: |
+          node scripts/gen-llms-full.js
+          if [ -n "$(git status --porcelain docs/llms-full.txt)" ]; then
+            echo "::error::docs/llms-full.txt is out of date. Run 'npm run docs' and commit."
+            git diff docs/llms-full.txt | head -40
+            exit 1
+          fi
+          echo "AI docs in sync."
+
+      - name: Check the doc examples run
+        run: npm run test:docs
+
   test-windows:
     name: Build and test (Windows)
     runs-on: windows-latest

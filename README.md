@@ -36,6 +36,28 @@ JavaScript.
 
 ---
 
+## For AI agents
+
+This package ships documentation designed to be read by an AI coding agent
+rather than a human skimming for the one API they need.
+
+| File | Purpose |
+| --- | --- |
+| [`llms.txt`](./llms.txt) | Short index of everything. Start here. |
+| [`AGENTS.md`](./AGENTS.md) | How to work *in* this repo. Conventions, build, test, release. |
+| [`docs/getting-started.md`](./docs/getting-started.md) | First brain in five minutes. |
+| [`docs/api.md`](./docs/api.md) | Every export, method, and option. |
+| [`docs/patterns.md`](./docs/patterns.md) | Copy-paste recipes. |
+| [`docs/gotchas.md`](./docs/gotchas.md) | What will surprise you. |
+| [`docs/concepts.md`](./docs/concepts.md) | How the neural model works. |
+| [`docs/llms-full.txt`](./docs/llms-full.txt) | All of the above in one file. |
+
+The `llms` and `llmsFull` fields in `package.json` point at `llms.txt` and
+`docs/llms-full.txt` respectively, so agents that follow that convention find
+them automatically.
+
+---
+
 ## Highlights
 
 - **Native core** — spiking neurons, region wiring, neuromodulators, needs,
@@ -797,9 +819,13 @@ scripts/
   no-native.js         fallback message when the addon cannot be built
   prepublish-check.js  guard that runs before every publish
   release.js           version bump, tag, and push
+  gen-llms-full.js     regenerates the single-file AI doc bundle
 examples/              runnable demos
 test/                  the test suite
+docs/                  agent-focused documentation
 .github/workflows/     CI and publish automation
+llms.txt               AI-readable index of the documentation
+AGENTS.md              instructions for coding agents
 ```
 
 The C++ core and the JS core implement the same API and are checked against

@@ -7,7 +7,8 @@
         "src/neuropile_core.cpp"
       ],
       "include_dirs": [
-        "<!@(node -p \"require('node-addon-api').include\")"
+        "<!@(node -p \"require('node-addon-api').include\")",
+        "src"
       ],
       "dependencies": [
         "<!(node -p \"require('node-addon-api').gyp\")"

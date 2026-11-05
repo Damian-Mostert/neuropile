@@ -1,16 +1,21 @@
 {
   "name": "neuropile",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A native C++ spiking-neuron brain core with a Node.js API. Regions, neuromodulators, needs, emotion, motor intent, memory, concepts, and neurogenesis - plug a growing brain into anything.",
   "keywords": [
     "brain",
     "neural-network",
-    "spiking",
+    "spiking-neurons",
     "neuromodulation",
     "cognitive-architecture",
     "neuropile",
     "napi",
-    "native-addon"
+    "native-addon",
+    "neurogenesis",
+    "memory",
+    "affect",
+    "embodied-ai",
+    "agent"
   ],
   "license": "MIT",
   "author": {
@@ -19,13 +24,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Damian-Mostert/Talos-website.git",
-    "directory": "cpp"
+    "url": "git+https://github.com/Damian-Mostert/neuropile.git"
   },
   "bugs": {
-    "url": "https://github.com/Damian-Mostert/Talos-website/issues"
+    "url": "https://github.com/Damian-Mostert/neuropile/issues"
   },
-  "homepage": "https://github.com/Damian-Mostert/Talos-website/tree/main/cpp#readme",
+  "homepage": "https://github.com/Damian-Mostert/neuropile#readme",
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {
@@ -74,5 +78,8 @@
   "engines": {
     "node": ">=18"
   },
-  "gypfile": true
+  "gypfile": true,
+  "publishConfig": {
+    "access": "public"
+  }
 }

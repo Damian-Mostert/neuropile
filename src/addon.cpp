@@ -2096,7 +2096,9 @@ Napi::Object InitAll(Napi::Env env, Napi::Object exports) {
     BrainWrap::Init(env, exports);
     exports.Set("soundPattern", Napi::Function::New(env, SoundPattern));
     exports.Set("native", Napi::Boolean::New(env, true));
-    exports.Set("version", Napi::String::New(env, "0.1.0"));
+    // The package version is injected by index.js at load time, so the addon
+    // and the package can never report different versions.
+    exports.Set("version", Napi::String::New(env, "0.0.0"));
     return exports;
 }
 

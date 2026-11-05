@@ -52,6 +52,16 @@ const nativeAvailable = Boolean(nativeModule && typeof nativeModule.BrainCore ==
 const nativeError = nativeLoad.error;
 const nativePath = nativeLoad.path;
 
+// Keep the addon's reported version in sync with package.json so the two can
+// never drift apart across releases.
+if (nativeModule) {
+  try {
+    nativeModule.version = VERSION;
+  } catch {
+    // Older builds may expose `version` as a read-only property. Not fatal.
+  }
+}
+
 // The raw native core has no timer of its own. Add the same start/stop
 // lifecycle the JS core provides without keeping the event loop alive.
 if (nativeAvailable) {

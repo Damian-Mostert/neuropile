@@ -1,0 +1,166 @@
+# Publish to npm when the package version changes.
+#
+# Triggered on every push to main, on version tags, and on releases. The job
+# checks whether the version in package.json is already on the npm registry; if
+# it is, the run stops without publishing anything. If it is not, the package
+# is built, tested, and published.
+#
+# ── Setup (one-time) ──────────────────────────────────────────────────────────
+#
+# Option A — OIDC trusted publishing (recommended, no long-lived secret):
+#   1. Go to https://www.npmjs.com/settings/access-tokens
+#   2. Pick the "Neuropile" package -> Settings -> Trusted Publisher
+#   3. Choose GitHub Actions and fill in:
+#        Organization or user:  Damian-Mostert
+#        Repository:             neuropile
+#        Workflow filename:      publish.yml
+#   4. Allow "npm publish" under Allowed actions.
+#   The workflow requests `id-token: write` below, and npm mints a
+#   short-lived token automatically. No secret to store, nothing to rotate.
+#
+# Option B — classic automation token:
+#   1. npm token create --automation
+#   2. Repository -> Settings -> Secrets and variables -> Actions
+#      -> New repository secret -> Name: NPM_TOKEN
+#
+# The workflow uses OIDC when no NPM_TOKEN secret is present, so you can start
+# with Option B and switch to Option A later without editing this file.
+#
+# ── How a release works ──────────────────────────────────────────────────────
+#   npm version patch      # bumps package.json + creates a commit and tag
+#   git push --follow-tags
+# The push bumps the version, the workflow notices the version is new on the
+# registry, and it publishes.
+
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+# Only one publish run at a time. The group is keyed on the repository rather
+# than the ref, so a release that fires several events (branch push, tag push,
+# and the release itself) collapses into a single run.
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Detect version and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Node 22.14+ and npm 11.5.1+ are required for OIDC trusted publishing.
+      # The setup-node action ships a current npm, so no separate install is
+      # needed.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Read package version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          echo "name=$NAME"       >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Package: $NAME@$VERSION"
+
+      - name: Check if version is already published
+        id: check
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          # A 404 means the version does not exist yet, so we should publish.
+          # Anything else that resolves means this version is already live.
+          if npm view "${NAME}@${VERSION}" version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is already on the registry. Skipping publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is not published yet. Continuing."
+          fi
+
+      - name: Install dependencies
+        if: steps.check.outputs.published == 'false'
+        # --ignore-scripts skips the package's own `install` script, which would
+        # otherwise run node-gyp before the toolchain flags below are applied.
+        # The addon is built explicitly in the next step instead.
+        run: npm ci --ignore-scripts
+
+      - name: Build native addon
+        if: steps.check.outputs.published == 'false'
+        run: npm run build
+
+      - name: Run tests
+        if: steps.check.outputs.published == 'false'
+        run: npm test
+
+      - name: Verify the native addon loads
+        if: steps.check.outputs.published == 'false'
+        run: |
+          node -e "
+            const { nativeAvailable, nativeModule, VERSION } = require('./index.js');
+            if (!nativeAvailable) {
+              console.error('Native addon failed to load.');
+              process.exit(1);
+            }
+            if (nativeModule.version !== VERSION) {
+              console.error('Version mismatch: addon=' + nativeModule.version + ' package=' + VERSION);
+              process.exit(1);
+            }
+            console.log('Native addon OK (' + nativeModule.version + ')');
+          "
+
+      - name: Publish to npm
+        id: publish
+        if: steps.check.outputs.published == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # With OIDC the npm CLI detects the GitHub Actions identity and
+          # exchanges it for a short-lived token automatically, and it also
+          # attaches provenance. With an NPM_TOKEN secret the classic token
+          # flow is used instead.
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "Publishing with the NPM_TOKEN secret."
+            npm publish --access public --provenance
+          else
+            echo "No NPM_TOKEN secret found. Publishing with OIDC trusted publishing."
+            npm publish --access public
+          fi
+
+      - name: Summarise
+        if: always() && steps.check.outputs.published == 'false'
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          OUTCOME: ${{ steps.publish.outcome }}
+        run: |
+          if [ "$OUTCOME" = "success" ]; then
+            echo "::notice::Published $NAME@$VERSION to npm."
+            echo "https://www.npmjs.com/package/$NAME/v/$VERSION"
+          elif [ "$OUTCOME" = "skipped" ]; then
+            echo "::notice::Publish step did not run for $NAME@$VERSION."
+          else
+            echo "::warning::Publish did not complete for $NAME@$VERSION."
+          fi

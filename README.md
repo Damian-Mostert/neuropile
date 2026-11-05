@@ -30,6 +30,7 @@ JavaScript.
 - [API reference](#api-reference)
 - [Performance](#performance)
 - [Environment variables](#environment-variables)
+- [Releasing](#releasing)
 - [Development](#development)
 - [License](#license)
 
@@ -682,6 +683,85 @@ Run `npm run benchmark` to measure it on your own machine. It takes
 
 ---
 
+## Releasing
+
+Publishing is automated. GitHub Actions watches for a version change and
+publishes to npm when it finds one.
+
+### One-time setup
+
+**Option A — OIDC trusted publishing (recommended).** No secret to store and
+nothing to rotate. npm mints a short-lived token for each publish, and
+attaches a provenance attestation automatically.
+
+1. Go to [npmjs.com → your package → Settings → Trusted Publisher](https://www.npmjs.com/settings/access-tokens)
+2. Choose **GitHub Actions** and fill in:
+   - Organization or user: `Damian-Mostert`
+   - Repository: `neuropile`
+   - Workflow filename: `publish.yml`
+3. Allow **`npm publish`** under *Allowed actions*.
+
+**Option B — a classic automation token.** Create one with
+`npm token create --automation`, then add it to the repository under
+*Settings → Secrets and variables → Actions → New repository secret* with the
+name `NPM_TOKEN`.
+
+The workflow uses OIDC when no `NPM_TOKEN` secret is present, so you can start
+with Option B and switch to Option A later without editing anything.
+
+### Cutting a release
+
+```bash
+npm run release           # patch: 0.1.1 -> 0.1.2
+npm run release -- minor  # minor: 0.1.1 -> 0.2.0
+npm run release -- major  # major: 0.1.1 -> 1.0.0
+```
+
+That bumps the version, commits, tags, and pushes. The push triggers the
+publish workflow, which compares the new version against the registry and
+publishes only if it is not already there.
+
+You can also do it by hand:
+
+```bash
+npm version patch
+git push --follow-tags
+```
+
+### What the publish workflow does
+
+| Step | Why |
+| --- | --- |
+| Read the version from `package.json` | Single source of truth. |
+| Check the npm registry | Skips the publish if the version already exists. |
+| `npm ci` | Installs dependencies from the lockfile. |
+| `npm run build` | Compiles the native addon. |
+| `npm test` | The full suite must pass before anything is published. |
+| Verify the addon loads | Catches a broken or mismatched build. |
+| `npm publish` | Publishes with provenance. |
+
+### Safety checks
+
+`npm run release` refuses to run when:
+
+- The working tree is dirty, so the tag always matches the commit.
+- The current version is already on the registry, since npm rejects
+  duplicate versions.
+
+Every publish also runs `scripts/prepublish-check.js`, which fails the publish
+if the version is not valid semver, the repository URL points at the wrong
+project, a listed file is missing, or the compiled addon reports a different
+version than `package.json`.
+
+### Workflows
+
+| File | Trigger | Does |
+| --- | --- | --- |
+| `.github/workflows/publish.yml` | Push to `main`, tag `v*`, release | Publishes to npm if the version is new. |
+| `.github/workflows/ci.yml` | Push to `main`, pull request | Builds and tests on Linux and Windows. |
+
+---
+
 ## Development
 
 ```bash
@@ -713,8 +793,13 @@ lib/
   beliefs.js           BeliefStore
   patterns.js          sensory hashing
   persistence.js       snapshot codecs + save/load
+scripts/
+  no-native.js         fallback message when the addon cannot be built
+  prepublish-check.js  guard that runs before every publish
+  release.js           version bump, tag, and push
 examples/              runnable demos
 test/                  the test suite
+.github/workflows/     CI and publish automation
 ```
 
 The C++ core and the JS core implement the same API and are checked against

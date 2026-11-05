@@ -1,0 +1,97 @@
+# Validate every push and pull request.
+#
+# This runs the same checks as the publish workflow but never touches npm. It
+# gives you a green/red signal on pull requests before they are merged into
+# main, where the publish workflow takes over.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native addon
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify the native addon loads
+        run: |
+          node -e "
+            const { nativeAvailable, nativeModule, VERSION } = require('./index.js');
+            if (!nativeAvailable) {
+              console.error('Native addon failed to load.');
+              process.exit(1);
+            }
+            if (nativeModule.version !== VERSION) {
+              console.error('Version mismatch: addon=' + nativeModule.version + ' package=' + VERSION);
+              process.exit(1);
+            }
+            console.log('Native addon OK (' + nativeModule.version + ')');
+          "
+
+      - name: Check the JS fallback still works
+        run: |
+          node -e "
+            const { createCore } = require('./index.js');
+            const core = createCore({ startNeurons: 5000, native: false });
+            core.tick(10);
+            if (core.tickCount !== 10) {
+              console.error('JS fallback did not tick.');
+              process.exit(1);
+            }
+            console.log('JS fallback OK');
+          "
+
+  test-windows:
+    name: Build and test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native addon
+        run: npm run build
+
+      - name: Run tests
+        run: npm test

@@ -67,7 +67,9 @@
     "example:game": "node examples/game-loop.js",
     "example:http": "node examples/http-server.js",
     "example:growth": "node examples/growth.js",
-    "benchmark": "node examples/benchmark.js"
+    "benchmark": "node examples/benchmark.js",
+    "release": "node scripts/release.js",
+    "prepublishOnly": "node scripts/prepublish-check.js"
   },
   "dependencies": {
     "node-addon-api": "^8.0.0"

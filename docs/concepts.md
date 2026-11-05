@@ -28,8 +28,11 @@ sensory / vision / audio
   BrainCore (C++ or JS)  ── spiking neurons, 16 regions, dopamine/NE
         │
         ├── emotionalState / behaviorState / motorIntent
+        ├── Drives              homeostatic drives, declared by the body
         │
         ├── MemoryCortex      associative, decaying, reafference-biased
+        ├── Grounding         binds world things to concepts; learns
+        │                    relatedness and feature-level affect
         ├── ConceptNet        sensory + emotional grounding of words
         ├── WorkingMemory     7 attention slots + shared focus
         ├── Genome            tunable personality/plasticity parameters
@@ -49,6 +52,13 @@ layers — the cognitive layers read back from it. `MemoryCortex.recall()` is
 biased by `core.reafference()`, and `Metacognition` writes its error signal
 back as dopamine through `core.reward()` / `core.punish()`. That feedback
 loop is what makes this a brain rather than a database with a mood.
+
+**The substrate learns by itself.** Hebbian plasticity runs on
+co-activation alone. Dopamine modulates the learning rate rather than
+gating it, so a brain that has merely watched the world has already changed,
+whether or not anyone scored the outcome. The co-activation window is
+measured in ticks, not wall-clock time, so learning does not depend on how
+fast the host happens to be running.
 
 ---
 
@@ -214,17 +224,42 @@ Derived from the three affect numbers plus regional activity.
 
 ## Needs and the body
 
-Three needs, each 0..1: `hunger`, `energy`, `joy`.
-
-They start at 0.5 and drift down. Low needs generate distress signals in the
-hypothalamus, and hunger below 0.4 produces pain signals and an amygdala
-response.
+Drives are declared by the body, not by the brain. A body made of flesh
+gets hungry and tired; a rover gets low on fuel and overheats. Which
+drives exist, how fast they decay, when they start to hurt, and what
+satisfies them are all facts about the body.
 
 ```js
-brain.getNeeds();          // { hunger, energy, joy }
-brain.setNeeds({ hunger: 0.2 });
-brain.handleInteraction('feed', 1.0);  // reduces hunger, rewards
+new Brain({
+  drives: {
+    fuel: {
+      decay: 0.01,
+      threshold: 0.3,      // below this it starts to hurt
+      critical: 0.1,       // below this it is an emergency
+      effort: 0.004,       // what movement costs it
+      satisfiedBy: ['diesel', 'charging-station'],
+    },
+  },
+});
 ```
+
+A brain with no drives declared has none, and `setNeeds({ hunger: 0.2 })`
+does nothing, because there is no hunger drive to set.
+
+Each drive starts at 0.5 and drifts down at its own rate. A drive below
+its threshold produces distress in its own sensory slot, so the brain can
+tell *which* drive is hurting. Below the critical threshold it is an
+emergency: the amygdala responds and valence falls. The most pressing
+drive pulls the motor system toward whatever last satisfied it.
+
+```js
+brain.getNeeds();          // { fuel: 0.42 }
+brain.setNeeds({ fuel: 0.2 });
+brain.integrateWorldState({ interaction: { label: 'diesel' } });
+```
+
+Because the vocabulary comes from the schema, a world can use any words it
+likes. There is no built-in notion of food.
 
 The body is a position in a unit square, plus heading, speed, and energy.
 
@@ -232,9 +267,9 @@ The body is a position in a unit square, plus heading, speed, and energy.
 brain.getBody(); // { x, y, heading, speed, energy }
 ```
 
-`integrateWorldState()` reads the body and needs and turns them into neural
-signals: spatial position relative to centre, distance from the border,
-motion, and need pressure.
+`integrateWorldState()` reads the body and the drives and turns them into
+neural signals: spatial position relative to centre, distance from the
+border, motion, and drive pressure.
 
 ---
 
@@ -332,6 +367,43 @@ recalled. `activeConcepts()` returns the strongest ones.
 
 `netEmotion()` sums the emotion of all active concepts, which is how a
 character's overall mood shifts toward whatever it has been thinking about.
+
+**There are no seeded concepts.** A brain that has experienced nothing has
+no opinions, not even about "good" and "bad". Whether a thing is pleasant
+is a fact about the world, and the world supplies it.
+
+---
+
+## Grounding
+
+Grounding is the layer that makes the brain's opinions *transferable*.
+
+```js
+brain.ground('ember', {
+  features: ['hot', 'burning', 'orange'],
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('flame', { features: ['hot', 'burning', 'orange'] });
+brain.emotionOf('flame');  // negative - it inherits the fear
+```
+
+Three things happen here.
+
+**Features carry affect.** When the environment declares that something is
+painful, that affect is recorded against the thing *and* against its
+features. Later, a label that shares those features inherits the affect
+even though the brain has never seen it. This is what lets the brain
+generalise instead of memorising.
+
+**Co-occurrence creates relations.** Two things seen together repeatedly
+become associated, and the association decays over time like any other
+trace. The brain learns that a kitten is like a cat by seeing them in the
+same context, not by knowing the words.
+
+**Labels are bound to referents.** A detection in the world is bound to a
+concept, so the label stops being a string and becomes the thing that was
+there.
 
 ---
 

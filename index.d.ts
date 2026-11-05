@@ -35,6 +35,15 @@ export interface BrainOptions {
   growthFanout?: number;
   /** Per-region growth multipliers, keyed by region name or given as an array. */
   growthProfile?: Record<string, number> | number[];
+
+  /**
+   * The homeostatic drives this body has.
+   *
+   * Which drives exist belongs to the body, not to the brain, so a brain
+   * with none declared has none. A rover might declare `fuel` and
+   * `coolant`; a pet might declare `hunger` and `energy`.
+   */
+  drives?: DriveSchema;
 }
 
 export interface Region {
@@ -115,12 +124,36 @@ export interface WorldState {
   opticFlow?: { x?: number; y?: number; magnitude?: number };
   motorHint?: MotorHint;
   needs?: Partial<Needs>;
-  detections?: Array<{ label?: string; w?: number; [key: string]: unknown }>;
+  /**
+   * Things the brain can perceive.
+   *
+   * `valence`, `arousal` and `approach` let the environment say what a
+   * thing is worth. The brain has no built-in opinion about any label, so
+   * without these a detection is simply something that was there.
+   */
+  detections?: Array<{
+    label?: string;
+    w?: number;
+    valence?: number;
+    arousal?: number;
+    approach?: number;
+    [key: string]: unknown;
+  }>;
+  /**
+   * Something that happened to the brain.
+   *
+   * As with detections, `valence`, `arousal` and `approach` describe what
+   * happened and how it felt. When they are present the brain uses them
+   * instead of guessing from the note text.
+   */
   interaction?: {
     note?: string;
     hungerLevel?: number;
     x?: number;
     y?: number;
+    valence?: number;
+    arousal?: number;
+    approach?: number;
     [key: string]: unknown;
   };
 }
@@ -322,8 +355,12 @@ export declare class BrainCore {
   tick(count?: number): number;
   reward(strength?: number): number;
   punish(strength?: number): number;
-  setNeeds(needs?: Partial<Needs>): Needs;
-  getNeeds(): Needs;
+  /** Set one or more drives. Unknown names are ignored. */
+  setNeeds(needs?: Record<string, number>): Record<string, number>;
+  /** The value of every drive the body has. */
+  getNeeds(): Record<string, number>;
+  /** Declare more drives at runtime. */
+  defineDrives(schema: DriveSchema): string[];
   getBody(): Body;
   getMotorState(): MotorState;
   setBody(body?: Partial<Body>): void;
@@ -414,6 +451,82 @@ export declare class ConceptNet {
   formatForLLM(): string | null;
   netEmotion(): EmotionVector;
   prune(): void;
+  snapshot(): Record<string, unknown>;
+  restore(snapshot: Record<string, unknown>): this;
+}
+
+export interface GroundOptions {
+  /**
+   * Features of the thing, and how much each should count.
+   *
+   * An array of names gives every feature equal weight. An object maps a
+   * name to a weight, where the weight says how much that feature
+   * contributes to the concept's affect. This matters when a feature is
+   * shared by things that should not share an opinion: "grey" belongs to a
+   * wolf and a pebble, but it should carry far less of the wolf's fear
+   * than "wild" does.
+   */
+  features?: string[] | Record<string, number> | null;
+  valence?: number | null;
+  arousal?: number | null;
+  approach?: number | null;
+  strength?: number;
+}
+
+export interface RelatedLabel {
+  label: string;
+  strength: number;
+}
+
+/**
+ * A homeostatic drive. Which drives a body has is a fact about the body,
+ * so the caller declares them. Nothing is seeded.
+ */
+export interface DriveDefinition {
+  /** How much the drive falls per tick. */
+  decay?: number;
+  /** Below this the drive starts to hurt. */
+  threshold?: number;
+  /** Below this the drive is an emergency. */
+  critical?: number;
+  /** How loudly neglect is felt. */
+  pain?: number;
+  /** How much the drive drives the hypothalamus. */
+  signal?: number;
+  /** How much satisfying it restores. */
+  restore?: number;
+  /** What movement costs this drive. */
+  effort?: number;
+  /** Where the drive starts. */
+  start?: number;
+  /** What satisfies this drive. Names, or a predicate. */
+  satisfiedBy?: string | string[] | ((label: string, event: Record<string, unknown>) => boolean);
+}
+
+/**
+ * The drives a body has. Accepts a list of names or a map of name to
+ * definition.
+ */
+export type DriveSchema = string[] | Record<string, DriveDefinition>;
+
+/**
+ * The grounding layer. Binds things in the world to concepts and learns how
+ * they relate to one another.
+ *
+ * Nothing here is seeded. A brain that has experienced nothing has no
+ * concepts and no opinions about anything.
+ */
+export declare class Grounding {
+  readonly size: number;
+  labels(): string[];
+  get(label: string): unknown | null;
+  emotionOf(label: string): EmotionVector | null;
+  observe(label: string, options?: GroundOptions): unknown | null;
+  coOccur(labels: string[], options?: { strength?: number }): void;
+  relatedness(a: string, b: string): number;
+  affectOf(label: string): EmotionVector | null;
+  nearest(label: string, limit?: number): RelatedLabel[];
+  tick(): void;
   snapshot(): Record<string, unknown>;
   restore(snapshot: Record<string, unknown>): this;
 }
@@ -540,6 +653,21 @@ export declare class Brain {
   activeConcepts(topN?: number): ConceptSnapshot[];
   netEmotion(): EmotionVector;
 
+  /**
+   * Bind a thing in the world to a concept.
+   *
+   * Features are what let affect generalise: declare that "hot, burning" is
+   * painful once, and every later thing with those features inherits the
+   * fear, even if the brain has never seen that label before.
+   */
+  ground(label: string, options?: GroundOptions): unknown | null;
+  /** Record that two things were perceived together. */
+  coOccur(labels: string[], options?: { strength?: number }): void;
+  /** How strongly the brain considers two labels related. */
+  relatedness(a: string, b: string): number;
+  /** Labels most similar to the given one. */
+  nearest(label: string, limit?: number): RelatedLabel[];
+
   hold(content: string, entities?: string[], type?: string, strength?: number): this;
   focus(topic: string, entities?: string[], source?: string, strength?: number): Focus | null;
   getFocus(): Focus | null;
@@ -580,8 +708,12 @@ export declare class Brain {
 
   reward(strength?: number): number;
   punish(strength?: number): number;
-  setNeeds(needs?: Partial<Needs>): Needs;
-  getNeeds(): Needs;
+  /** Set one or more drives. Unknown names are ignored. */
+  setNeeds(needs?: Record<string, number>): Record<string, number>;
+  /** The value of every drive the body has. */
+  getNeeds(): Record<string, number>;
+  /** Declare more drives at runtime. */
+  defineDrives(schema: DriveSchema): string[];
   getBody(): Body;
   getMotorState(): MotorState;
   move(dx?: number, dy?: number, intensity?: number): Body;
@@ -612,6 +744,10 @@ export declare class Brain {
 export declare function createCore(options?: BrainOptions): BrainCore;
 export declare function soundPattern(text: string, size?: number): Uint32Array;
 export declare function labelHash(label: string): number;
+/** Overlap between two encoded patterns, as a Jaccard similarity. */
+export declare function patternOverlap(a: ArrayLike<number>, b: ArrayLike<number>): number;
+/** Shared fraction of the smaller of two encoded patterns. */
+export declare function containment(a: ArrayLike<number>, b: ArrayLike<number>): number;
 export declare function save(
   brain: Brain | Record<string, unknown>,
   filePath: string,
@@ -657,6 +793,7 @@ declare const _default: {
   NativeNeuralEngine: typeof NeuralEngine | null;
   MemoryCortex: typeof MemoryCortex;
   ConceptNet: typeof ConceptNet;
+  Grounding: typeof Grounding;
   WorkingMemory: typeof WorkingMemory;
   Genome: typeof Genome;
   Homeostasis: typeof Homeostasis;
@@ -664,6 +801,8 @@ declare const _default: {
   BeliefStore: typeof BeliefStore;
   soundPattern: typeof soundPattern;
   labelHash: typeof labelHash;
+  patternOverlap: typeof patternOverlap;
+  containment: typeof containment;
   createCore: typeof createCore;
   nativeAvailable: typeof nativeAvailable;
   nativeModule: typeof nativeModule;

@@ -31,7 +31,12 @@ test('tick advances the clock and reward/punish move dopamine', () => {
 });
 
 test('needs clamp and move updates the body', () => {
-  const core = new BrainCore({ neurons: 2000, seed: 3 });
+  // Drives are declared by the body, so the test declares its own.
+  const core = new BrainCore({
+    neurons: 2000,
+    seed: 3,
+    drives: { hunger: {}, energy: {}, joy: {} },
+  });
   core.setNeeds({ hunger: 5, energy: -2, joy: 0.4 });
   const needs = core.getNeeds();
   assert.equal(needs.hunger, 1);
@@ -44,18 +49,36 @@ test('needs clamp and move updates the body', () => {
   assert.equal(core.getMotorState().lastAction, 'move');
 });
 
+test('a brain with no declared drives has no needs', () => {
+  const core = new BrainCore({ neurons: 2000, seed: 3 });
+  assert.deepEqual(core.getNeeds(), {});
+
+  // Setting a drive the body does not have does nothing.
+  core.setNeeds({ hunger: 0.2 });
+  assert.deepEqual(core.getNeeds(), {});
+});
+
 test('world state integration produces emotion and behavior', () => {
-  const core = new BrainCore({ neurons: 4000, seed: 4 });
+  const core = new BrainCore({
+    neurons: 4000,
+    seed: 4,
+    drives: {
+      hunger: { threshold: 0.4, satisfiedBy: ['feed'] },
+      energy: {},
+      joy: {},
+    },
+  });
   const emotion = core.integrateWorldState({
     body: { x: 0.2, y: 0.3, heading: 0.5, speed: 0.4, vx: 0.1, vy: 0.2 },
     needs: { hunger: 0.2, energy: 0.5, joy: 0.6 },
     detections: [{ label: 'self', w: 0.4 }, { label: 'violet-glow', w: 0.3 }],
-    interaction: { note: 'feed', hungerLevel: 0.2, x: 0.4, y: 0.4 },
+    interaction: { note: 'feed', x: 0.4, y: 0.4 },
   });
 
   assert.equal(typeof emotion.valence, 'number');
   assert.equal(typeof emotion.arousal, 'number');
   assert.equal(typeof emotion.drive, 'number');
+  // The interaction satisfied the hunger drive, so it went up.
   assert.ok(emotion.needs.hunger > 0.2);
 
   const behavior = core.behaviorState();

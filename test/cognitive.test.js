@@ -42,13 +42,21 @@ test('MemoryCortex decay multipliers differ by type', () => {
   assert.equal(decayMult('utterance'), decayMult('procedural'));
 });
 
-test('ConceptNet seeds primitives and learns from experience', () => {
+test('ConceptNet starts blank and learns from experience', () => {
   const net = new ConceptNet();
-  assert.ok(net.size >= 25);
 
-  assert.ok(net.emotionOf('danger').valence < 0);
-  assert.ok(net.emotionOf('safe').valence > 0);
+  // A brain that has experienced nothing has no opinions, not even about
+  // "danger" or "safe". Those are facts about the world, supplied by it.
+  assert.equal(net.size, 0);
+  assert.equal(net.emotionOf('danger'), null);
+  assert.equal(net.emotionOf('safe'), null);
 
+  // An unknown word cannot be activated: the brain has no concept for it.
+  assert.equal(net.activate('food', 1.0), null);
+
+  // Once the brain has met the word, it can be recalled and activated.
+  net.learn('food', { edible: 0.8 }, { valence: 0.5, arousal: 0.3 }, 'eat', 0.8);
+  assert.equal(net.size, 1);
   net.activate('food', 1.0);
   const active = net.activeConceptsSnapshot(3);
   assert.ok(active.some(c => c.label === 'food'));
@@ -165,17 +173,71 @@ test('BeliefStore records provenance and deliberates', () => {
   assert.equal(store.items.length, 2);
 });
 
-test('soundPattern is deterministic and matches the djb2 formula', () => {
+test('soundPattern is deterministic and produces a sparse distributed code', () => {
   const a = soundPattern('fire', 400000);
   const b = soundPattern('fire', 400000);
   assert.deepEqual([...a], [...b]);
-  assert.equal(a.length, 200);
+  assert.ok(a.length > 0);
+  assert.ok(a.length <= 200);
   assert.ok(a.every(i => i >= 0 && i < 400000));
 
-  // Independent implementation of core/boot.js soundPattern.
-  let h = 5381;
-  for (let i = 0; i < 'fire'.length; i++) h = (Math.imul(h, 31) ^ 'fire'.charCodeAt(i)) >>> 0;
-  const expected = new Uint32Array(200);
-  for (let j = 0; j < 200; j++) expected[j] = (Math.imul(h ^ j, 2654435761) >>> 0) % 400000;
-  assert.deepEqual([...a], [...expected]);
+  // Sparse: every index is distinct.
+  assert.equal(new Set(a).size, a.length);
+});
+
+test('soundPattern gives related words overlapping codes and unrelated words none', () => {
+  const { patternOverlap, containment } = require('../lib/patterns');
+
+  // Composition: a phrase contains the code of its words.
+  assert.ok(containment(soundPattern('the cat sat'), soundPattern('cat')) > 0.5);
+  assert.ok(containment(soundPattern('dog bites'), soundPattern('dog')) > 0.5);
+
+  // Unrelated words share almost nothing.
+  assert.ok(patternOverlap(soundPattern('zebra'), soundPattern('quartz')) < 0.3);
+
+  // Identity is preserved.
+  assert.equal(patternOverlap(soundPattern('fire'), soundPattern('fire')), 1);
+});
+
+test('grounding generalises affect to labels the brain has never seen', () => {
+  const { Grounding } = require('../lib/grounding');
+  const g = new Grounding();
+
+  // A blank brain knows nothing.
+  assert.equal(g.size, 0);
+  assert.equal(g.affectOf('ember'), null);
+
+  // The world says the ember is painful and hot.
+  g.observe('ember', {
+    features: ['hot', 'burning', 'orange'],
+    valence: -0.9,
+    arousal: 0.8,
+    approach: -1.0,
+    strength: 0.9,
+  });
+
+  // "flame" is new, but it shares the features, so it inherits the fear.
+  g.observe('flame', { features: ['hot', 'burning', 'orange'], strength: 0.9 });
+  const flame = g.affectOf('flame');
+  assert.ok(flame.valence < -0.2, `expected flame to inherit negative valence, got ${flame.valence}`);
+
+  // Something unrelated does not inherit it.
+  g.observe('banana', { features: ['yellow', 'fruit'], strength: 0.9 });
+  const banana = g.affectOf('banana');
+  assert.ok(Math.abs(banana.valence) < 0.15, `expected banana to stay neutral, got ${banana.valence}`);
+});
+
+test('grounding learns relatedness from co-occurrence', () => {
+  const { Grounding } = require('../lib/grounding');
+  const g = new Grounding();
+
+  for (let i = 0; i < 12; i++) {
+    g.observe('kitten', { features: ['furry', 'young'] });
+    g.observe('cat', { features: ['furry', 'adult'] });
+    g.coOccur(['kitten', 'cat'], { strength: 0.8 });
+  }
+
+  assert.ok(g.relatedness('cat', 'kitten') > 0.5);
+  assert.ok(g.relatedness('cat', 'rock') < 0.1);
+  assert.equal(g.nearest('cat')[0].label, 'kitten');
 });

@@ -7,6 +7,10 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace neuropile {
 
@@ -46,6 +50,7 @@ NeuralEngine::NeuralEngine(uint32_t neuronCount, uint32_t synapsesPerNeuron) {
     threshold.assign(n, 1.0f);
     decayRate.assign(n, 0.95f);
     firedAt.assign(n, 0.0);
+    firedTick.assign(n, -1);
     inhibitory.assign(n, 0);
 
     const size_t synapseTotal = static_cast<size_t>(n) * static_cast<size_t>(synapseCapacity);
@@ -107,6 +112,16 @@ float NeuralEngine::inject(uint32_t i, float signal) {
         active_[i] = 1;
         activeList_.push_back(static_cast<int32_t>(i));
     }
+    // Injecting enough to cross threshold makes the neuron spike, exactly
+    // as a real one would. Previously inject() only raised the membrane
+    // potential and left it there, so a stimulus that arrived through
+    // inject() - which is most of them - never produced a spike and
+    // therefore never produced any learning.
+    if (potential[i] >= threshold[i]) {
+        const float residual = threshold[i] * 0.8f;
+        propagate(i);
+        potential[i] = residual;
+    }
     return potential[i];
 }
 
@@ -150,28 +165,41 @@ void NeuralEngine::fire(uint32_t i, double now) {
     if (firedAt[i] != 0.0 && now - firedAt[i] < REFRACTORY_MS) return;
 
     firedAt[i] = now;
+    firedTick[i] = tickCounter_;
     potential[i] = 0.0f;
 
     const size_t base = static_cast<size_t>(i) * synapseCapacity;
     const uint32_t count = synapseCounts[i];
     const float sign = inhibitory[i] ? -1.0f : 1.0f;
     const double da = dopamine;
-    const bool doHebbian = da > 0.05 || da < -0.05;
+
+    // Hebbian plasticity always runs. Co-activation is the learning signal
+    // on its own, the way it is in a real cortex: a brain that watches two
+    // things happen together learns they go together, with or without
+    // anyone scoring the outcome.
+    //
+    // Dopamine modulates the rate rather than gating it. Reward makes
+    // learning faster and punishment makes it slower, but neither is
+    // required for the synapse to change at all.
+    const bool modulated = da > 0.05 || da < -0.05;
+    const float learningRate = HEBBIAN_RATE * (modulated
+        ? std::max(0.1f, static_cast<float>(1.0 + da))
+        : 1.0f);
+    const float decayRate = WEIGHT_DECAY * static_cast<float>(1.0 - da * 0.5);
 
     for (uint32_t k = 0; k < count; ++k) {
         const uint32_t dst = synapseTargets[base + k];
 
-        if (doHebbian) {
-            const bool coActive = firedAt[dst] != 0.0 && now - firedAt[dst] < 50.0;
-            if (coActive) {
-                const float rate = HEBBIAN_RATE * std::max(0.1f, static_cast<float>(1.0 + da));
-                const float w = synapseWeights[base + k] + rate;
-                synapseWeights[base + k] = w > MAX_WEIGHT ? MAX_WEIGHT : w;
-            } else {
-                const float decay = WEIGHT_DECAY * static_cast<float>(1.0 - da * 0.5);
-                const float w = synapseWeights[base + k] - decay;
-                synapseWeights[base + k] = w < MIN_WEIGHT ? MIN_WEIGHT : w;
-            }
+        // Co-activation is measured in ticks, so it behaves the same whether
+        // the host is ticking at 1 Hz or 1 kHz.
+        const bool coActive = firedTick[dst] >= 0
+            && tickCounter_ - firedTick[dst] <= CO_ACTIVE_TICKS;
+        if (coActive) {
+            const float w = synapseWeights[base + k] + learningRate;
+            synapseWeights[base + k] = w > MAX_WEIGHT ? MAX_WEIGHT : w;
+        } else {
+            const float w = synapseWeights[base + k] - decayRate;
+            synapseWeights[base + k] = w < MIN_WEIGHT ? MIN_WEIGHT : w;
         }
 
         const float newPot = potential[dst] + sign * synapseWeights[base + k];
@@ -195,6 +223,9 @@ void NeuralEngine::tick() {
     const size_t listSize = activeList_.size();
     const bool overload = listSize > 50000;
     const float inhibScale = overload ? 0.35f : 1.0f;
+
+    // Advance the simulation clock used for co-activation.
+    tickCounter_++;
 
     size_t writeIdx = 0;
     for (size_t i = 0; i < listSize; ++i) {
@@ -292,6 +323,7 @@ void NeuralEngine::remapFrom(const NeuralEngine& src, const std::vector<uint32_t
         threshold[j] = src.threshold[i];
         decayRate[j] = src.decayRate[i];
         firedAt[j] = src.firedAt[i];
+        firedTick[j] = src.firedTick.empty() ? -1 : src.firedTick[i];
         inhibitory[j] = src.inhibitory[i];
 
         const size_t oldBase = static_cast<size_t>(i) * src.synapseCapacity;
@@ -310,6 +342,105 @@ void NeuralEngine::remapFrom(const NeuralEngine& src, const std::vector<uint32_t
     dopamine = src.dopamine;
     norepinephrine = src.norepinephrine;
     rebuildActiveSet();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drives — the homeostatic system
+// ─────────────────────────────────────────────────────────────────────────────
+
+Drive* Drives::find(const std::string& name) {
+    for (auto& d : items) {
+        if (d.name == name) return &d;
+    }
+    return nullptr;
+}
+
+const Drive* Drives::find(const std::string& name) const {
+    for (const auto& d : items) {
+        if (d.name == name) return &d;
+    }
+    return nullptr;
+}
+
+void Drives::define(const std::string& name, const Drive& def) {
+    Drive* existing = find(name);
+    if (existing) {
+        // Redefining keeps the current value so a drive can be extended
+        // without resetting how satisfied the body currently is.
+        const float value = existing->value;
+        *existing = def;
+        existing->name = name;
+        existing->value = value;
+        return;
+    }
+    Drive copy = def;
+    copy.name = name;
+    items.push_back(copy);
+}
+
+void Drives::set(const std::string& name, float value) {
+    Drive* d = find(name);
+    if (!d) return;
+    d->value = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+}
+
+void Drives::satisfy(const std::string& name, float amount) {
+    Drive* d = find(name);
+    if (!d) return;
+    float next = d->value + amount;
+    d->value = next < 0.0f ? 0.0f : (next > 1.0f ? 1.0f : next);
+}
+
+void Drives::tick() {
+    for (auto& d : items) {
+        float next = d.value - d.decay;
+        d.value = next < 0.0f ? 0.0f : (next > 1.0f ? 1.0f : next);
+    }
+}
+
+float Drives::average() const {
+    if (items.empty()) return 1.0f;
+    float sum = 0.0f;
+    for (const auto& d : items) sum += d.value;
+    return sum / static_cast<float>(items.size());
+}
+
+const Drive* Drives::mostPressing() const {
+    const Drive* worst = nullptr;
+    float worstGap = 0.0f;
+    for (const auto& d : items) {
+        const float gap = d.threshold - d.value;
+        if (gap > worstGap) {
+            worstGap = gap;
+            worst = &d;
+        }
+    }
+    return worst;
+}
+
+bool Drives::satisfies(const std::string& name, const std::string& label) const {
+    const Drive* d = find(name);
+    if (!d || d->satisfiedBy.empty()) return false;
+    if (label.empty()) return false;
+    for (const auto& candidate : d->satisfiedBy) {
+        if (candidate == label) return true;
+    }
+    return false;
+}
+
+int Drives::apply(const std::string& label, float amount, bool hasPos, float x, float y) {
+    int count = 0;
+    for (auto& d : items) {
+        if (!satisfies(d.name, label)) continue;
+        satisfy(d.name, amount);
+        if (hasPos) {
+            d.hasSource = true;
+            d.sourceX = x;
+            d.sourceY = y;
+        }
+        count++;
+    }
+    return count;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -403,7 +534,12 @@ BrainCore::BrainCore(const BrainOptions& options)
     baseline_.assign(assoc.size, 0.0f);
     reafBaseline_.assign(assoc.size, 0.0f);
 
-    needs_ = Needs{};
+    // The drives this body has. Declared by the caller, so there are none
+    // unless the body says it has them.
+    for (const Drive& drive : options_.drives) {
+        drives_.define(drive.name, drive);
+    }
+
     body_ = Body{};
     motorState_ = MotorState{};
 
@@ -453,15 +589,36 @@ void BrainCore::wireRegions(const std::string& srcName,
     const uint32_t requested = static_cast<uint32_t>(std::floor(static_cast<double>(src->size) * density));
     const uint32_t sampleSize = std::min(options_.maxConnections, requested);
 
-    std::uniform_int_distribution<uint32_t> srcDist(0, src->size - 1);
     std::uniform_int_distribution<uint32_t> dstDist(0, dst->size - 1);
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
 
+    // Distribute the connections evenly across the source neurons rather
+    // than picking sources at random.
+    //
+    // Picking at random means a few neurons get many connections and most
+    // get none or one, because there are far more source neurons than
+    // connections. A neuron with no outgoing synapse cannot pass on
+    // anything it learns, so the region as a whole barely participates.
+    // With the old scheme the average neuron carried about two outgoing
+    // connections, which is far too sparse for co-activation to ever
+    // connect two neurons reliably.
+    //
+    // Even distribution gives every source neuron at least one way to
+    // transmit, so activity actually propagates through the network.
+    const uint32_t perSource = sampleSize / src->size > 0 ? sampleSize / src->size : 1;
+
     for (uint32_t k = 0; k < sampleSize; ++k) {
-        const uint32_t i = src->start + srcDist(rng_);
+        const uint32_t i = src->start + (k % src->size);
         const uint32_t j = dst->start + dstDist(rng_);
         const float w = wMin + unit(rng_) * (wMax - wMin);
         engine_.connect(i, j, w);
+        // Give some neurons more than one target so the population can carry
+        // more than a single bit of information.
+        if ((k % src->size) < perSource - 1) {
+            const uint32_t j2 = dst->start + dstDist(rng_);
+            const float w2 = wMin + unit(rng_) * (wMax - wMin);
+            engine_.connect(i, j2, w2);
+        }
     }
 }
 
@@ -783,6 +940,9 @@ void BrainCore::tick(uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) {
         engine_.tick();
         ++tickCount_;
+        // Drives decay with the simulation clock, not with the times
+        // somebody happened to read the emotional state.
+        tickNeeds();
     }
     maybeGrow();
 }
@@ -795,15 +955,33 @@ void BrainCore::punish(float strength) {
     engine_.dopamine = std::max(engine_.dopamine - static_cast<double>(strength), -1.0);
 }
 
-Needs BrainCore::setNeeds(const Needs& needs) {
-    needs_.hunger = safeNeed(needs.hunger);
-    needs_.energy = safeNeed(needs.energy);
-    needs_.joy = safeNeed(needs.joy);
-    return needs_;
+// Drives are dynamic: which ones exist is decided by the caller. Unknown
+// names are ignored, because a body cannot have a drive it never declared.
+void BrainCore::setNeeds(const std::vector<std::pair<std::string, float>>& needs) {
+    for (const auto& entry : needs) {
+        drives_.set(entry.first, safeNeed(entry.second));
+    }
 }
 
-Needs BrainCore::getNeeds() const {
-    return needs_;
+std::vector<std::string> BrainCore::defineDrives(const std::vector<Drive>& drives) {
+    for (const Drive& drive : drives) {
+        drives_.define(drive.name, drive);
+    }
+    std::vector<std::string> names;
+    for (const auto& drive : drives_.items) names.push_back(drive.name);
+    return names;
+}
+
+Drives BrainCore::getDrives() const {
+    return drives_;
+}
+
+std::vector<std::pair<std::string, float>> BrainCore::getDrivesValues() const {
+    std::vector<std::pair<std::string, float>> out;
+    for (const auto& drive : drives_.items) {
+        out.emplace_back(drive.name, drive.value);
+    }
+    return out;
 }
 
 Body BrainCore::getBody() const {
@@ -815,9 +993,7 @@ MotorState BrainCore::getMotorState() const {
 }
 
 void BrainCore::tickNeeds() {
-    needs_.hunger = clampf(needs_.hunger - 0.002f, 0.0f, 1.0f);
-    needs_.energy = clampf(needs_.energy - 0.0015f, 0.0f, 1.0f);
-    needs_.joy = clampf(needs_.joy - 0.0018f, 0.0f, 1.0f);
+    drives_.tick();
 }
 
 Body BrainCore::move(float dx, float dy, float intensity) {
@@ -831,8 +1007,13 @@ Body BrainCore::move(float dx, float dy, float intensity) {
     }
     body_.speed = std::sqrt(dx * dx + dy * dy) * speed;
     body_.energy = clampf(body_.energy - 0.01f * speed, 0.0f, 1.0f);
-    needs_.energy = clampf(needs_.energy - 0.01f * speed, 0.0f, 1.0f);
-    needs_.joy = clampf(needs_.joy - 0.003f * speed, 0.0f, 1.0f);
+    // Movement costs whatever the body says it costs. A drive may
+    // declare an `effort` cost, which is what moving takes out of it.
+    for (auto& drive : drives_.items) {
+        if (drive.effort > 0.0f) {
+            drives_.satisfy(drive.name, -drive.effort * speed);
+        }
+    }
     motorState_.moveX = dx;
     motorState_.moveY = dy;
     motorState_.lastAction = "move";
@@ -858,32 +1039,27 @@ Body BrainCore::move(float dx, float dy, float intensity) {
     return body_;
 }
 
-Needs BrainCore::handleInteraction(const std::string& kind, float intensity) {
+// Handle something that happened to the body. What it does is decided by
+// the drive definitions: if any drive says this satisfies it, that drive
+// is restored and the event is rewarding. Otherwise it is mildly
+// aversive.
+void BrainCore::handleInteraction(const std::string& kind, float intensity) {
     tickNeeds();
     const float strength = clampf(intensity, 0.1f, 1.0f);
+    const std::string label = lowerAscii(kind);
 
-    if (kind == "feed") {
-        needs_.hunger = std::min(1.0f, needs_.hunger + 0.28f * strength);
-        needs_.joy = std::min(1.0f, needs_.joy + 0.08f * strength);
-        reward(0.7f + 0.2f * strength);
-    } else if (kind == "rest") {
-        needs_.energy = std::min(1.0f, needs_.energy + 0.3f * strength);
-        needs_.joy = std::min(1.0f, needs_.joy + 0.04f * strength);
-        reward(0.45f + 0.15f * strength);
-    } else if (kind == "play" || kind == "poke") {
-        needs_.joy = std::min(1.0f, needs_.joy + 0.18f * strength);
-        needs_.energy = std::max(0.0f, needs_.energy - 0.04f * strength);
-        reward(0.25f + 0.1f * strength);
-    } else if (kind == "danger") {
-        needs_.energy = std::max(0.0f, needs_.energy - 0.08f * strength);
-        needs_.joy = std::max(0.0f, needs_.joy - 0.06f * strength);
-        punish(0.2f + 0.1f * strength);
-    } else {
-        needs_.joy = std::max(0.0f, needs_.joy - 0.02f * strength);
-        punish(0.05f * strength);
+    const int satisfied = drives_.apply(label, 0.28f * strength, false, 0.0f, 0.0f);
+    if (satisfied > 0) {
+        const Drive* d = drives_.find(label);
+        (void)d;
+        reward(0.3f + 0.4f * strength);
+        return;
     }
 
-    return needs_;
+    // Nothing needed it. If the body declares a drive that this event
+    // makes worse, that is handled by the drive's own definition; absent
+    // that, the event is simply unwelcome.
+    punish(0.05f * strength);
 }
 
 float BrainCore::amygdalaActivate(float threatLevel) {
@@ -1002,47 +1178,59 @@ EmotionalState BrainCore::integrateWorldState(const WorldState& state) {
 
     if (state.hasNeeds) {
         setNeeds(state.needs);
-        const float needAverage = (needs_.hunger + needs_.energy + needs_.joy) / 3.0f;
-        const float needSignal = 2.4f + (1.0f - needAverage) * 1.8f;
+    }
 
-        engine_.pulse(hypo.start, needSignal * (1.0f + (needs_.hunger < 0.4f ? 1.2f : 0.0f)));
-        engine_.pulse(hypo.start + 8, needSignal * (1.0f + (needs_.energy < 0.3f ? 0.9f : 0.0f)));
-        engine_.pulse(hypo.start + 16, needSignal * (1.0f + (needs_.joy < 0.3f ? 0.7f : 0.0f)));
-        engine_.pulse(thalamus.start + 24, needSignal * (1.0f + (needs_.hunger < 0.4f ? 0.8f : 0.0f)));
-        engine_.pulse(thalamus.start + 32, needSignal * (1.0f + (needs_.energy < 0.3f ? 0.6f : 0.0f)));
-        engine_.pulse(thalamus.start + 40, needSignal * (1.0f + (needs_.joy < 0.3f ? 0.5f : 0.0f)));
+    // Homeostatic signal. Each declared drive contributes to the
+    // hypothalamus according to how neglected it is and how much the
+    // body said it should matter. Nothing here names a specific drive.
+    const float driveAverage = drives_.average();
+    const float pressure = 1.0f - driveAverage;
+    const float needSignal = 2.4f + pressure * 1.8f;
+    engine_.pulse(hypo.start, needSignal);
 
-        if (needs_.hunger < 0.4f) {
-            const float pain = (0.4f - needs_.hunger) * 4.0f;
-            engine_.pulse(sensory.start + 32, pain * 2.2f);
-            engine_.inject(sensory.start + 40, pain * 1.8f);
-            amygdalaActivate(pain * 0.2f);
-        }
-        if (needs_.energy < 0.3f) {
-            const float fatigue = (0.3f - needs_.energy) * 4.0f;
-            engine_.pulse(sensory.start + 48, fatigue * 2.0f);
-        }
-        if (needs_.joy < 0.3f) {
-            const float distress = (0.3f - needs_.joy) * 4.0f;
-            engine_.pulse(sensory.start + 56, distress * 1.8f);
-            punish(distress * 0.05f);
-        }
+    for (size_t i = 0; i < drives_.items.size(); ++i) {
+        const Drive& drive = drives_.items[i];
+        if (drive.value >= drive.threshold) continue;
 
-        if (needs_.hunger < 0.5f && hasLastFood_) {
-            const float toFoodX = lastFoodX_ - body_.x;
-            const float toFoodY = lastFoodY_ - body_.y;
-            const float hunger = 1.0f - needs_.hunger;
-            const uint32_t qSize = motorQuadrantSize();
-            engine_.inject(motor.start + (toFoodX > 0.0f ? 0u : qSize), hunger * 1.2f);
-            engine_.inject(motor.start + (toFoodY > 0.0f ? qSize * 2 : qSize * 3), hunger * 1.2f);
+        const float gap = drive.threshold - drive.value;
+        const float intensity = gap * drive.pain;
+
+        // Each drive gets its own slot in the sensory region so the brain
+        // can tell which drive is hurting rather than just that something
+        // does. Slots are assigned in the order the drives were declared.
+        const size_t slot = i;
+        const uint32_t sensorySlot = sensory.start + 32 + static_cast<uint32_t>(slot % 8) * 8;
+        const uint32_t hypoSlot = hypo.start + static_cast<uint32_t>(slot % 3) * 8;
+
+        engine_.pulse(hypoSlot, needSignal * (1.0f + gap) * drive.signal);
+        engine_.pulse(sensorySlot, intensity * 2.2f);
+        engine_.inject(sensorySlot + 4, intensity * 1.8f);
+
+        if (drive.value < drive.critical) {
+            // A drive that has gone critical is an emergency, and it is
+            // felt as one.
+            amygdalaActivate(intensity * 0.2f);
+            punish(intensity * 0.05f);
         }
+    }
+
+    // The most pressing drive pulls the motor system toward whatever
+    // last satisfied it. Which drive that is, and where that thing was,
+    // both come from the world rather than from the brain.
+    const Drive* pressing = drives_.mostPressing();
+    if (pressing && pressing->value < pressing->threshold && pressing->hasSource) {
+        const float toX = pressing->sourceX - body_.x;
+        const float toY = pressing->sourceY - body_.y;
+        const float urge = (1.0f - pressing->value) * 1.2f;
+        const uint32_t qSize = motorQuadrantSize();
+        engine_.inject(motor.start + (toX > 0.0f ? 0u : qSize), urge);
+        engine_.inject(motor.start + (toY > 0.0f ? qSize * 2 : qSize * 3), urge);
     }
 
     if (!state.detections.empty()) {
         const uint32_t stride = std::max<uint32_t>(64, visual.size / 256);
         const uint32_t span = visual.size > stride ? visual.size - stride : 1;
 
-        bool hasSalient = false;
         for (const Detection& det : state.detections) {
             const std::string label = lowerAscii(det.label.empty() ? "object" : det.label);
 
@@ -1060,49 +1248,69 @@ EmotionalState BrainCore::integrateWorldState(const WorldState& state) {
             engine_.inject(visual.start + static_cast<uint32_t>(std::floor(visual.size * 0.1f)) + (hash % 128), value * 0.6f);
             engine_.pulse(thalamus.start + (hash % 32), value * 0.7f);
 
-            if (label == "self" || label == "violet-glow" ||
-                label == "cyan-light" || label == "warm-glow") {
-                hasSalient = true;
+            // The environment may declare what a detection is worth. This is
+            // how a user teaches the brain that something is dangerous
+            // without the brain knowing the word "danger".
+            if (det.hasAffect) {
+                // Affect enters through dopamine, which is the persistent
+                // signal. Writing it straight into the running valence
+                // average meant it was overwritten on the next read.
+                reward(det.valence * 0.4f * w);
+                if (det.arousal != 0.0f) arousal_ += det.arousal * 0.05f * w;
+                if (det.valence < -0.3f) {
+                    amygdalaActivate(-det.valence * w);
+                }
             }
-        }
-
-        if (hasSalient) {
-            reward(0.08f);
-            amygdalaActivate(0.15f);
         }
     }
 
     if (state.interaction.present && !state.interaction.note.empty()) {
-        const std::string note = lowerAscii(state.interaction.note);
-        const bool isFood = note.find("feed") != std::string::npos || note.find("food") != std::string::npos;
-        const bool isPoke = note.find("poke") != std::string::npos;
-        const bool isAverse = note.find("aversive") != std::string::npos;
-        const bool isDanger = note.find("danger") != std::string::npos || note.find("hurt") != std::string::npos;
+        const std::string label = lowerAscii(
+            state.interaction.label.empty() ? state.interaction.note : state.interaction.label);
 
-        if (isFood) {
-            const float hungerLevel = state.interaction.hasHungerLevel
-                ? state.interaction.hungerLevel
-                : needs_.hunger;
-            const float rawReward = 0.3f + (1.0f - hungerLevel) * 1.4f;
-            needs_.hunger = std::min(1.0f, needs_.hunger + 0.28f);
-            needs_.joy = std::min(1.0f, needs_.joy + 0.06f);
-            reward(rawReward);
+        // Which drives this event satisfies is decided by the drive
+        // definitions, so a world can use any vocabulary it likes.
+        const int satisfied = drives_.apply(
+            label,
+            0.28f * (state.interaction.hasIntensity ? state.interaction.intensity : 1.0f),
+            state.interaction.hasX && state.interaction.hasY,
+            state.interaction.x,
+            state.interaction.y);
 
-            if (state.interaction.hasX && state.interaction.hasY) {
-                hasLastFood_ = true;
-                lastFoodX_ = state.interaction.x;
-                lastFoodY_ = state.interaction.y;
+        // The environment may declare the affect of an interaction directly.
+        // When it does, that is what the brain uses. There is no built-in
+        // vocabulary for interactions: what happened and how it felt come
+        // from the world.
+        if (state.interaction.hasAffect) {
+            if (state.interaction.hasValence) {
+                reward(state.interaction.valence * 0.5f);
+                valence_ += state.interaction.valence * 0.15f;
             }
-
+            if (state.interaction.hasArousal) {
+                arousal_ += state.interaction.arousal * 0.1f;
+            }
+            if (state.interaction.hasApproach) {
+                drive_ += std::fabs(state.interaction.approach) * 0.1f;
+            }
+            if (state.interaction.hasValence && state.interaction.valence < -0.3f) {
+                amygdalaActivate(-state.interaction.valence * 0.8f);
+            }
+            engine_.pulse(thalamus.start, 2.8f);
+            engine_.pulse(assoc.start, 2.5f);
+            engine_.inject(assoc.start + 8, 1.8f);
+        } else if (satisfied > 0) {
+            // Something the body needed happened, and that is rewarding.
+            reward(0.3f + 0.4f);
             engine_.pulse(thalamus.start, 2.8f);
             engine_.pulse(assoc.start, 2.5f);
             engine_.inject(assoc.start + 8, 1.8f);
             amygdalaActivate(0.1f);
-        } else if (isPoke || isAverse || isDanger) {
+        } else {
+            // Something happened that the body did not need and was not
+            // told how to feel about. It is mildly aversive and pushes the
+            // body away from it.
             amygdalaActivate(0.8f);
             punish(0.4f);
-            needs_.energy = std::max(0.0f, needs_.energy - 0.05f);
-            needs_.joy = std::max(0.0f, needs_.joy - 0.04f);
 
             engine_.pulse(sensory.start + 0, 2.5f);
             engine_.pulse(sensory.start + 8, 2.2f);
@@ -1116,11 +1324,6 @@ EmotionalState BrainCore::integrateWorldState(const WorldState& state) {
             const float awayY = body_.y < py ? -1.0f : 1.0f;
             engine_.inject(motor.start + (awayX > 0.0f ? 0u : qSize), 1.8f);
             engine_.inject(motor.start + (awayY > 0.0f ? qSize * 2 : qSize * 3), 1.8f);
-        } else {
-            handleInteraction(note, 1.0f);
-            engine_.pulse(sensory.start, 1.9f);
-            engine_.inject(assoc.start, 1.7f);
-            engine_.inject(motor.start + 24, 0.6f);
         }
     }
 
@@ -1159,7 +1362,7 @@ EmotionalState BrainCore::emotionalState() {
     const float accMean = meanOfRegion("acc", 2);
     const float rapheMean = meanOfRegion("raphe", 2);
 
-    const float needAverage = (needs_.hunger + needs_.energy + needs_.joy) / 3.0f;
+    const float needAverage = drives_.average();
     const float pressure = 1.0f - needAverage;
 
     const float hypothPressure = tanhf_(hypothMean * 20.0 + pressure * 0.5);
@@ -1167,8 +1370,15 @@ EmotionalState BrainCore::emotionalState() {
     const float rawDrive = tanhf_(hippMean * 15.0 + hypothPressure * 0.6);
 
     const float serotoninStability = tanhf_(rapheMean * 30.0);
+
+    // Valence comes from dopamine, which is how the world tells the brain
+    // what felt good and what did not. The baseline offset keeps a brain
+    // with nothing to feel from sitting at exactly zero, and it scales
+    // with the number of drives because a body with no drives has no
+    // homeostatic baseline to be mildly positive about.
+    const float baseline = drives_.items.empty() ? 0.0f : 0.2f;
     const float rawValence = tanhf_(
-        engine_.dopamine + 0.2 - pressure * 0.7 * (1.0 - serotoninStability * 0.3));
+        engine_.dopamine + baseline - pressure * 0.7 * (1.0 - serotoninStability * 0.3));
     const float conflictPenalty = tanhf_(accMean * 25.0) * 0.15f;
 
     valence_ = valence_ * 0.7f + (rawValence - conflictPenalty) * 0.3f;
@@ -1180,7 +1390,7 @@ EmotionalState BrainCore::emotionalState() {
     out.arousal = arousal_;
     out.drive = drive_;
     out.norepinephrine = tanhf_(engine_.norepinephrine);
-    out.needs = needs_;
+    out.needs = getDrivesValues();
     out.body = body_;
     return out;
 }
@@ -1196,7 +1406,7 @@ BehaviorState BrainCore::behaviorState() {
     const float pfcMean = meanOfRegion("prefrontal", 8);
     const float assocMean = meanOfRegion("association", 8);
 
-    const float needAverage = (needs_.hunger + needs_.energy + needs_.joy) / 3.0f;
+    const float needAverage = drives_.average();
     const float pressure = 1.0f - needAverage;
 
     BehaviorState out;
@@ -1379,7 +1589,7 @@ float BrainCore::selfAwareness() {
     const Region& motor = regionRef("motor");
     const Region& visual = regionRef("visual");
 
-    const float needAverage = (needs_.hunger + needs_.energy + needs_.joy) / 3.0f;
+    const float needAverage = drives_.average();
     const float needsPressure = 1.0f - needAverage;
     const float assocPeak = engine_.peakAbs(assoc.start, assoc.end);
 
@@ -1641,18 +1851,127 @@ void BrainCore::consolidateDense(const std::vector<float>& values, float strengt
 // Pattern hashing
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::vector<uint32_t> soundPattern(const std::string& text, uint32_t size, uint32_t length) {
-    uint32_t h = 5381;
-    for (unsigned char c : text) {
+// Sparse distributed codes for sensory patterns.
+//
+// This mirrors lib/patterns.js exactly. A string is broken into shallow
+// lexical features (2-grams, 3-grams, 4-grams, suffix, whole token), each
+// feature is projected into the code space through several independent
+// hashes, and the strongest resulting indices form the sparse code.
+//
+// The point is overlap: similar strings produce partially overlapping codes,
+// and a phrase contains the code of its words. A plain hash of the whole
+// string could do neither, which meant the substrate could never learn that
+// two things were related.
+
+namespace {
+
+constexpr uint32_t kPatternProjections = 3;
+constexpr uint32_t kPatternIndicesPerFeature = 6;
+
+constexpr double kWeightWhole = 4.0;
+constexpr double kWeightQuad = 2.5;
+constexpr double kWeightTri = 1.0;
+constexpr double kWeightBi = 0.3;
+
+uint32_t hashFeature(const std::string& feature, uint32_t seed) {
+    uint32_t h = 5381u ^ seed;
+    for (unsigned char c : feature) {
         h = (h * 31u) ^ static_cast<uint32_t>(c);
     }
+    return h;
+}
 
-    if (length == 0) length = 200;
-    std::vector<uint32_t> out(length);
-    for (uint32_t j = 0; j < length; ++j) {
-        const uint32_t mixed = (h ^ j) * 2654435761u;
-        out[j] = size == 0 ? 0 : (mixed % size);
+void appendFeature(std::vector<std::pair<std::string, double>>& feats,
+                   const std::string& feature, double weight) {
+    feats.emplace_back(feature, weight);
+}
+
+// Split a token into weighted lexical features. Mirrors lexicalFeatures()
+// in lib/patterns.js.
+void lexicalFeatures(const std::string& token,
+                     std::vector<std::pair<std::string, double>>& feats) {
+    if (token.empty()) return;
+
+    for (size_t i = 0; i + 2 <= token.size(); ++i) {
+        appendFeature(feats, "b:" + token.substr(i, 2), kWeightBi);
     }
+    for (size_t i = 0; i + 3 <= token.size(); ++i) {
+        appendFeature(feats, "t:" + token.substr(i, 3), kWeightTri);
+    }
+    if (token.size() > 4) {
+        for (size_t i = 0; i + 4 <= token.size(); ++i) {
+            appendFeature(feats, "q:" + token.substr(i, 4), kWeightQuad);
+        }
+    }
+    if (token.size() >= 4) {
+        appendFeature(feats, "e:" + token.substr(token.size() - 4), kWeightTri * 2.0);
+    }
+    appendFeature(feats, "w:" + token, kWeightWhole);
+}
+
+// Split text into alphanumeric words, matching the JS regex /[a-z0-9']+/g
+// applied to a lowercased string.
+std::vector<std::string> splitWords(const std::string& text) {
+    std::vector<std::string> words;
+    std::string current;
+    for (unsigned char c : text) {
+        const bool isWordChar = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '\'';
+        if (isWordChar) {
+            current.push_back(static_cast<char>(c));
+        } else if (!current.empty()) {
+            words.push_back(current);
+            current.clear();
+        }
+    }
+    if (!current.empty()) words.push_back(current);
+    return words;
+}
+
+}  // namespace
+
+std::vector<uint32_t> soundPattern(const std::string& text, uint32_t size, uint32_t length) {
+    if (length == 0) length = 200;
+    if (size == 0) return std::vector<uint32_t>();
+
+    std::vector<std::pair<std::string, double>> feats;
+    for (const std::string& word : splitWords(lowerAscii(text))) {
+        lexicalFeatures(word, feats);
+    }
+
+    // Accumulate feature weight per candidate index.
+    std::vector<std::pair<uint32_t, double>> buckets;
+    std::unordered_map<uint32_t, size_t> seen;
+
+    for (const auto& [feature, weight] : feats) {
+        for (uint32_t p = 0; p < kPatternProjections; ++p) {
+            const uint32_t h = hashFeature(feature, p * 0x9e3779b9u);
+            for (uint32_t k = 0; k < kPatternIndicesPerFeature; ++k) {
+                const uint32_t mixed = (h ^ k) * 2654435761u;
+                const uint32_t idx = mixed % size;
+                auto it = seen.find(idx);
+                if (it == seen.end()) {
+                    seen[idx] = buckets.size();
+                    buckets.emplace_back(idx, weight);
+                } else {
+                    buckets[it->second].second += weight;
+                }
+            }
+        }
+    }
+
+    if (buckets.empty()) return std::vector<uint32_t>();
+
+    // Strongest first, with index as a deterministic tie-break so the native
+    // core and the JS port always agree.
+    std::sort(buckets.begin(), buckets.end(),
+              [](const std::pair<uint32_t, double>& a, const std::pair<uint32_t, double>& b) {
+                  if (a.second != b.second) return a.second > b.second;
+                  return a.first < b.first;
+              });
+
+    const size_t count = std::min<size_t>(length, buckets.size());
+    std::vector<uint32_t> out(count);
+    for (size_t i = 0; i < count; ++i) out[i] = buckets[i].first;
     return out;
 }
 

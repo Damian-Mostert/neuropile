@@ -13,12 +13,13 @@ const { NeuralEngine } = require('./lib/engine');
 const { BrainCore: JsBrainCore, BASE_REGIONS } = require('./lib/brain');
 const { MemoryCortex } = require('./lib/memory');
 const { ConceptNet } = require('./lib/concepts');
+const { Grounding } = require('./lib/grounding');
 const { WorkingMemory } = require('./lib/working-memory');
 const { Genome } = require('./lib/genome');
 const { Homeostasis } = require('./lib/homeostasis');
 const { Metacognition } = require('./lib/metacognition');
 const { BeliefStore } = require('./lib/beliefs');
-const { soundPattern, labelHash, SENSORY_SIZE, PATTERN_LENGTH } = require('./lib/patterns');
+const { soundPattern, labelHash, patternOverlap, containment, SENSORY_SIZE, PATTERN_LENGTH } = require('./lib/patterns');
 const persistence = require('./lib/persistence');
 
 const VERSION = require('./package.json').version;
@@ -105,7 +106,7 @@ function createCore(options = {}) {
 }
 
 const CORE_PROXY_METHODS = [
-  'reward', 'punish', 'setNeeds', 'getNeeds', 'getBody', 'getMotorState', 'move',
+  'reward', 'punish', 'setNeeds', 'getNeeds', 'defineDrives', 'getBody', 'getMotorState', 'move',
   'integrateWorldState', 'handleInteraction', 'amygdalaActivate', 'startle',
   'emotionalState', 'behaviorState', 'decideBehavior', 'actionSelection', 'novelty',
   'reafference', 'selfAwareness', 'getMotorIntent', 'readInternalState', 'neuronMap',
@@ -128,6 +129,7 @@ class Brain {
 
     this.memory = new MemoryCortex(this.genome);
     this.concepts = new ConceptNet();
+    this.grounding = new Grounding();
     this.workingMemory = new WorkingMemory();
     this.metacognition = new Metacognition(this.genome);
     this.homeostasis = new Homeostasis(this.genome, this.metacognition, this.memory);
@@ -174,6 +176,8 @@ class Brain {
   tick(count = 1) {
     const result = this.core.tick(count);
     this.workingMemory.tick();
+    // Learned relations fade like any other memory trace.
+    this.grounding.tick();
     return result;
   }
 
@@ -305,11 +309,22 @@ class Brain {
     this.core.perceive(pattern);
     this.core.encode(pattern, strength);
 
+    // Also record it in the grounding layer so the affect generalises to
+    // anything that shares the same features.
+    this.grounding.observe(word, {
+      features: Object.entries(sensory || {}).map(([k, v]) => [k, Number(v) || 0]),
+      valence: emotion?.valence ?? null,
+      arousal: emotion?.arousal ?? null,
+      approach: emotion?.approach ?? null,
+      strength,
+    });
+
     return concept;
   }
 
   associate(wordA, wordB, strength = 0.3) {
     this.concepts.associate(wordA, wordB, strength);
+    this.grounding.coOccur([wordA, wordB], { strength });
     const a = soundPattern(wordA);
     const b = soundPattern(wordB);
     this.core.encode(a, strength);
@@ -318,6 +333,11 @@ class Brain {
   }
 
   emotionOf(word) {
+    // Prefer the grounding layer, which accounts for inherited affect from
+    // shared features. Fall back to the concept table for words that only
+    // exist there.
+    const grounded = this.grounding.affectOf(word);
+    if (grounded) return grounded;
     return this.concepts.emotionOf(word);
   }
 
@@ -327,6 +347,35 @@ class Brain {
 
   netEmotion() {
     return this.concepts.netEmotion();
+  }
+
+  // ── Grounding ──────────────────────────────────────────────────────────────
+  // The environment supplies the facts. Nothing is known until it is
+  // declared here or learned from co-occurrence.
+
+  // Bind a thing in the world to a concept, with optional features and
+  // optional affect. Features are what let affect generalise: declare that
+  // "hot, burning" is painful once, and every later thing with those
+  // features inherits the fear.
+  ground(label, options = {}) {
+    return this.grounding.observe(label, options);
+  }
+
+  // Record that two things were perceived together. Repeated co-occurrence
+  // teaches the brain that they are related.
+  coOccur(labels, options = {}) {
+    return this.grounding.coOccur(labels, options);
+  }
+
+  // How strongly the brain considers two labels related, learned from
+  // co-occurrence and shared features.
+  relatedness(a, b) {
+    return this.grounding.relatedness(a, b);
+  }
+
+  // Labels most similar to the given one.
+  nearest(label, limit = 5) {
+    return this.grounding.nearest(label, limit);
   }
 
   // ── Working memory ─────────────────────────────────────────────────────────
@@ -436,6 +485,7 @@ class Brain {
       focus: this.workingMemory.getFocus(),
       memorySize: this.memory.size,
       conceptSize: this.concepts.size,
+      groundingSize: this.grounding.size,
       beliefs: this.beliefs.items.length,
       internal: this.core.readInternalState(),
     };
@@ -455,13 +505,21 @@ class Brain {
       `NEURAL tick=${this.core.tickCount} native=${this.native} neurons=${this.core.neuronCount}/${this.core.maxNeurons}`,
       `AFFECT valence=${emotion.valence.toFixed(3)} arousal=${emotion.arousal.toFixed(3)} drive=${emotion.drive.toFixed(3)} ne=${emotion.norepinephrine.toFixed(3)}`,
       `BEHAVIOR curiosity=${behavior.curiosity.toFixed(2)} uncertainty=${behavior.uncertainty.toFixed(2)} action=${behavior.actionReadiness.toFixed(2)} speech=${behavior.speechReadiness.toFixed(2)}`,
-      `NEEDS hunger=${emotion.needs.hunger.toFixed(2)} energy=${emotion.needs.energy.toFixed(2)} joy=${emotion.needs.joy.toFixed(2)}`,
+      `NEEDS ${this._formatNeeds(emotion.needs)}`,
       `CONCEPTS ${concepts || '(none active)'}`,
       `WORKING MEMORY\n${working}`,
       `MEMORIES\n${memories}`,
       ledger ? `GENOME LEDGER\n${ledger}` : null,
       meta ? `METACOGNITION accuracy=${meta.recent_accuracy}` : null,
     ].filter(Boolean).join('\n');
+  }
+
+  // Format the drives for a prompt. The drive names come from the body, so
+  // this works for any set of drives the caller declared.
+  _formatNeeds(needs = {}) {
+    const entries = Object.entries(needs || {});
+    if (entries.length === 0) return '(none)';
+    return entries.map(([name, value]) => `${name}=${Number(value).toFixed(2)}`).join(' ');
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -491,6 +549,7 @@ class Brain {
       genome: this.genome.snapshot(),
       memory: this.memory.snapshot(),
       concepts: this.concepts.snapshot(),
+      grounding: this.grounding.snapshot(),
       workingMemory: this.workingMemory.snapshot(),
       metacognition: this.metacognition.snapshot(),
       beliefs: this.beliefs.snapshot(),
@@ -507,6 +566,7 @@ class Brain {
     if (snapshot.genome) this.genome.restore(snapshot.genome);
     if (snapshot.memory) this.memory.restore(snapshot.memory);
     if (snapshot.concepts) this.concepts.restore(snapshot.concepts);
+    if (snapshot.grounding) this.grounding.restore(snapshot.grounding);
     if (snapshot.workingMemory) this.workingMemory.restore(snapshot.workingMemory);
     if (snapshot.metacognition) this.metacognition.restore(snapshot.metacognition);
     if (snapshot.beliefs) this.beliefs.restore(snapshot.beliefs);
@@ -550,6 +610,7 @@ module.exports = {
   NativeNeuralEngine: nativeAvailable ? nativeModule.NeuralEngine : null,
   MemoryCortex,
   ConceptNet,
+  Grounding,
   WorkingMemory,
   Genome,
   Homeostasis,
@@ -557,6 +618,8 @@ module.exports = {
   BeliefStore,
   soundPattern,
   labelHash,
+  patternOverlap,
+  containment,
   createCore,
   nativeAvailable,
   nativeModule,

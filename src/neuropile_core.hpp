@@ -26,6 +26,20 @@ namespace neuropile {
 constexpr double PI = 3.14159265358979323846;
 
 constexpr double REFRACTORY_MS = 20.0;
+
+// Co-activation window, measured in ticks rather than wall-clock time.
+//
+// This used to be 50 milliseconds of real time, which quietly broke
+// learning at any realistic tick rate: at 10 Hz a tick takes 100 ms, so two
+// neurons that fired in the same tick were never within 50 ms of each other
+// and no synapse ever saw co-activation. Learning only appeared to work at
+// very high tick rates, and it made the brain's behaviour depend on how fast
+// the host loop happened to be running.
+//
+// Counting in ticks makes the learning window a property of the simulation
+// rather than of the machine.
+constexpr int64_t CO_ACTIVE_TICKS = 2;
+
 constexpr float HEBBIAN_RATE = 0.012f;
 constexpr float WEIGHT_DECAY = 0.002f;
 constexpr float MAX_WEIGHT = 1.5f;
@@ -47,10 +61,50 @@ struct Region {
     uint32_t baseSize = 0;
 };
 
-struct Needs {
-    float hunger = 0.5f;
-    float energy = 0.5f;
-    float joy = 0.5f;
+// A homeostatic drive. Which drives a body has is a fact about the body,
+// so the caller declares them. Nothing is seeded.
+struct Drive {
+    std::string name;
+    float value = 0.5f;
+    float decay = 0.002f;
+    float threshold = 0.4f;
+    float critical = 0.15f;
+    float pain = 4.0f;
+    float signal = 1.0f;
+    float restore = 0.28f;
+    float effort = 0.0f;
+    // What satisfies this drive. The world decides, so this is a list of
+    // names rather than a fixed vocabulary.
+    std::vector<std::string> satisfiedBy;
+    bool hasSource = false;
+    float sourceX = 0.0f;
+    float sourceY = 0.0f;
+};
+
+// The set of drives a body has, with helpers for the operations the core
+// needs. Mirrors lib/drives.js.
+class Drives {
+public:
+    std::vector<Drive> items;
+
+    Drive* find(const std::string& name);
+    const Drive* find(const std::string& name) const;
+
+    void define(const std::string& name, const Drive& def);
+    void set(const std::string& name, float value);
+    void satisfy(const std::string& name, float amount);
+    void tick();
+    float average() const;
+
+    // The drive furthest below its threshold.
+    const Drive* mostPressing() const;
+
+    // Does this label satisfy the drive?
+    bool satisfies(const std::string& name, const std::string& label) const;
+
+    // Apply an event to the drives it satisfies. Returns the number of
+    // drives affected.
+    int apply(const std::string& label, float amount, bool hasPos, float x, float y);
 };
 
 struct Body {
@@ -72,7 +126,8 @@ struct EmotionalState {
     float arousal = 0.0f;
     float drive = 0.0f;
     float norepinephrine = 0.0f;
-    Needs needs;
+    // The value of each drive the body has, by name.
+    std::vector<std::pair<std::string, float>> needs;
     Body body;
 };
 
@@ -119,17 +174,37 @@ struct Detection {
     float y = 0.0f;
     float w = 0.2f;
     float h = 0.2f;
+    // Affect supplied by the environment. The brain has no built-in
+    // knowledge of what any label means; the world tells it.
+    float valence = 0.0f;
+    float arousal = 0.0f;
+    float approach = 0.0f;
+    bool hasAffect = false;
 };
 
 struct Interaction {
     bool present = false;
     std::string note;
+    // The label the world calls this event. Used to work out which drives
+    // it satisfies. Falls back to the note when empty.
+    std::string label;
     float x = 0.5f;
     float y = 0.5f;
     bool hasX = false;
     bool hasY = false;
     float hungerLevel = 0.5f;
     bool hasHungerLevel = false;
+    float intensity = 1.0f;
+    bool hasIntensity = false;
+    // Affect supplied by the environment. When present, the brain uses
+    // these instead of guessing from the note text.
+    float valence = 0.0f;
+    float arousal = 0.0f;
+    float approach = 0.0f;
+    bool hasValence = false;
+    bool hasArousal = false;
+    bool hasApproach = false;
+    bool hasAffect = false;
 };
 
 struct WorldState {
@@ -150,7 +225,8 @@ struct WorldState {
     std::string motorHintMode;
 
     bool hasNeeds = false;
-    Needs needs;
+    // Drive values, by name. Which drives exist is decided by the body.
+    std::vector<std::pair<std::string, float>> needs;
 
     std::vector<Detection> detections;
     Interaction interaction;
@@ -180,6 +256,10 @@ struct BrainOptions {
     bool wire = true;
     bool hasSeed = false;
     uint32_t seed = 0;
+
+    // The homeostatic drives this body has. Declared by the caller,
+    // because the drives belong to the body rather than to the brain.
+    std::vector<Drive> drives;
 };
 
 class NeuralEngine {
@@ -213,6 +293,10 @@ public:
     std::vector<float> threshold;
     std::vector<float> decayRate;
     std::vector<double> firedAt;
+    // Tick on which each neuron last fired. Used for the co-activation
+    // window, which is measured in ticks rather than wall-clock time so
+    // that learning does not depend on the host's tick rate.
+    std::vector<int64_t> firedTick;
     std::vector<uint8_t> inhibitory;
 
     std::vector<uint32_t> synapseTargets;
@@ -221,6 +305,9 @@ public:
 
     double dopamine = 0.0;
     double norepinephrine = 0.0;
+
+    // Simulation clock used for the co-activation window.
+    int64_t tickCounter_ = 0;
 
 private:
     void propagate(uint32_t start);
@@ -243,14 +330,19 @@ public:
     void reward(float strength = 1.0f);
     void punish(float strength = 1.0f);
 
-    Needs setNeeds(const Needs& needs);
-    Needs getNeeds() const;
+    // Drives are dynamic: which ones exist is decided by the caller.
+    void setNeeds(const std::vector<std::pair<std::string, float>>& needs);
+    // Declare more drives at runtime.
+    std::vector<std::string> defineDrives(const std::vector<Drive>& drives);
+    Drives getDrives() const;
+    // The value of each drive the body has, by name.
+    std::vector<std::pair<std::string, float>> getDrivesValues() const;
     Body getBody() const;
     MotorState getMotorState() const;
 
     Body move(float dx, float dy, float intensity = 1.0f);
     EmotionalState integrateWorldState(const WorldState& state);
-    Needs handleInteraction(const std::string& kind, float intensity = 1.0f);
+    void handleInteraction(const std::string& kind, float intensity = 1.0f);
     float amygdalaActivate(float threatLevel = 0.5f);
     void startle(float strength = 1.0f);
 
@@ -388,7 +480,8 @@ private:
     float arousal_ = 0.0f;
     float drive_ = 0.0f;
 
-    Needs needs_;
+    // The homeostatic drives this body has. Declared by the caller.
+    Drives drives_;
     Body body_;
     MotorState motorState_;
 

@@ -24,7 +24,10 @@ for (const rel of docs) {
   if (!fs.existsSync(file)) continue;
   const md = fs.readFileSync(file, 'utf8');
 
-  const blocks = [...md.matchAll(/```js\n([\s\S]*?)```/g)].map(m => m[1]);
+  // Match both LF and CRLF code fences. The docs are edited on Windows,
+  // so some blocks arrive with carriage returns, and a pattern that only
+  // matched LF silently found nothing at all.
+  const blocks = [...md.matchAll(/```js\r?\n([\s\S]*?)```/g)].map(m => m[1]);
 
   blocks.forEach((raw, i) => {
     const label = `${rel} block ${i + 1}`;

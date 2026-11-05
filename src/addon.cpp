@@ -26,7 +26,8 @@ using neuropile::EmotionalState;
 using neuropile::Interaction;
 using neuropile::MotorIntent;
 using neuropile::MotorState;
-using neuropile::Needs;
+using neuropile::Drive;
+using neuropile::Drives;
 using neuropile::NeuralEngine;
 using neuropile::Region;
 using neuropile::RegionStat;
@@ -246,6 +247,17 @@ Napi::Uint8Array CopyUint8(Napi::Env env, const std::vector<uint8_t>& values) {
     return out;
 }
 
+// int64 arrays carry the tick on which each neuron last fired. They are
+// narrowed to Int32 so the snapshot stays JSON-serializable, matching the
+// JavaScript engine, which uses an Int32Array for the same field.
+Napi::Int32Array CopyInt64(Napi::Env env, const std::vector<int64_t>& values) {
+    Napi::Int32Array out = Napi::Int32Array::New(env, values.size());
+    for (size_t i = 0; i < values.size(); ++i) {
+        out[i] = static_cast<int32_t>(values[i]);
+    }
+    return out;
+}
+
 bool RestoreFloat32(Napi::Env env,
                     const Napi::Value& value,
                     std::vector<float>& target,
@@ -302,13 +314,98 @@ bool RestoreUint8(Napi::Env env,
     return true;
 }
 
+bool RestoreInt64(Napi::Env env,
+                  const Napi::Value& value,
+                  std::vector<int64_t>& target,
+                  const char* name) {
+    // A missing value is not an error: snapshots taken before the tick
+    // counter existed simply have no co-activation state to restore.
+    if (value.IsUndefined() || value.IsNull()) return true;
+
+    // Typed arrays are read through the generic ArrayBuffer path so this
+    // works across the node-addon-api versions that do and do not expose
+    // typed-array helpers for every element type.
+    if (!value.IsTypedArray()) {
+        Napi::TypeError::New(env, std::string(name) + " must be a typed array")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+
+    Napi::TypedArray array = value.As<Napi::TypedArray>();
+    if (array.ElementLength() != target.size()) {
+        Napi::RangeError::New(env, std::string(name) + " has the wrong length").ThrowAsJavaScriptException();
+        return false;
+    }
+
+    // The field is an Int32Array on the JavaScript side, which is what the
+    // JavaScript engine uses there too.
+    if (array.TypedArrayType() != napi_int32_array) {
+        Napi::TypeError::New(env, std::string(name) + " must be an Int32Array")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+
+    Napi::Int32Array values = array.As<Napi::Int32Array>();
+    for (size_t i = 0; i < target.size(); ++i) {
+        target[i] = static_cast<int64_t>(values[i]);
+    }
+    return true;
+}
+
+// Parse a drive schema: a map of drive name to definition. The names and
+// the vocabulary that satisfies them come from the caller, because the
+// drives belong to the body rather than to the brain.
+std::vector<Drive> ParseDriveSchema(Napi::Object schema) {
+    std::vector<Drive> drives;
+    Napi::Array names = schema.GetPropertyNames();
+    for (uint32_t i = 0; i < names.Length(); ++i) {
+        Napi::Value nameValue = names.Get(i);
+        if (!nameValue.IsString()) continue;
+        const std::string name = nameValue.As<Napi::String>().Utf8Value();
+
+        Drive drive;
+        drive.name = name;
+
+        Napi::Value def = schema.Get(name);
+        if (def.IsObject()) {
+            Napi::Object defObject = def.As<Napi::Object>();
+            ReadFloat(defObject.Get("decay"), drive.decay, drive.decay);
+            ReadFloat(defObject.Get("threshold"), drive.threshold, drive.threshold);
+            ReadFloat(defObject.Get("critical"), drive.critical, drive.critical);
+            ReadFloat(defObject.Get("pain"), drive.pain, drive.pain);
+            ReadFloat(defObject.Get("signal"), drive.signal, drive.signal);
+            ReadFloat(defObject.Get("restore"), drive.restore, drive.restore);
+            ReadFloat(defObject.Get("effort"), drive.effort, drive.effort);
+            ReadFloat(defObject.Get("start"), drive.value, drive.value);
+
+            Napi::Value satisfiedBy = defObject.Get("satisfiedBy");
+            if (satisfiedBy.IsString()) {
+                drive.satisfiedBy.push_back(satisfiedBy.As<Napi::String>().Utf8Value());
+            } else if (satisfiedBy.IsArray()) {
+                Napi::Array list = satisfiedBy.As<Napi::Array>();
+                for (uint32_t k = 0; k < list.Length(); ++k) {
+                    Napi::Value entry = list.Get(k);
+                    if (entry.IsString()) {
+                        drive.satisfiedBy.push_back(entry.As<Napi::String>().Utf8Value());
+                    }
+                }
+            }
+        }
+
+        drives.push_back(drive);
+    }
+    return drives;
+}
+
 // ── Result object helpers ────────────────────────────────────────────────────
 
-Napi::Object NeedsObject(Napi::Env env, const Needs& needs) {
+// The drive values, by name. Which drives exist is decided by the body,
+// so the shape of this object is whatever the caller declared.
+Napi::Object NeedsObject(Napi::Env env, const std::vector<std::pair<std::string, float>>& needs) {
     Napi::Object out = Napi::Object::New(env);
-    out.Set("hunger", Napi::Number::New(env, needs.hunger));
-    out.Set("energy", Napi::Number::New(env, needs.energy));
-    out.Set("joy", Napi::Number::New(env, needs.joy));
+    for (const auto& entry : needs) {
+        out.Set(entry.first, Napi::Number::New(env, entry.second));
+    }
     return out;
 }
 
@@ -412,12 +509,19 @@ WorldState ParseWorldState(Napi::Env env, const Napi::Value& value) {
         if (mode.IsString()) state.motorHintMode = mode.As<Napi::String>().Utf8Value();
     }
 
+    // Drive values, by name. The caller may use any drive names it declared.
     if (GetObjectProperty(object, "needs", item) && item.IsObject()) {
         Napi::Object needs = item.As<Napi::Object>();
+        Napi::Array names = needs.GetPropertyNames();
         state.hasNeeds = true;
-        ReadFloat(needs.Get("hunger"), state.needs.hunger, state.needs.hunger);
-        ReadFloat(needs.Get("energy"), state.needs.energy, state.needs.energy);
-        ReadFloat(needs.Get("joy"), state.needs.joy, state.needs.joy);
+        for (uint32_t i = 0; i < names.Length(); ++i) {
+            Napi::Value nameValue = names.Get(i);
+            if (!nameValue.IsString()) continue;
+            const std::string name = nameValue.As<Napi::String>().Utf8Value();
+            float value = 0.5f;
+            ReadFloat(needs.Get(name), value, value);
+            state.needs.emplace_back(name, value);
+        }
     }
 
     if (GetObjectProperty(object, "detections", item) && item.IsArray()) {
@@ -435,6 +539,23 @@ WorldState ParseWorldState(Napi::Env env, const Napi::Value& value) {
             ReadFloat(det.Get("y"), detection.y, detection.y);
             ReadFloat(det.Get("w"), detection.w, detection.w);
             ReadFloat(det.Get("h"), detection.h, detection.h);
+            // Affect supplied by the environment. Absent means the brain
+            // has no opinion about this detection yet.
+            Napi::Value valence = det.Get("valence");
+            if (valence.IsNumber()) {
+                detection.valence = valence.As<Napi::Number>().FloatValue();
+                detection.hasAffect = true;
+            }
+            Napi::Value arousal = det.Get("arousal");
+            if (arousal.IsNumber()) {
+                detection.arousal = arousal.As<Napi::Number>().FloatValue();
+                detection.hasAffect = true;
+            }
+            Napi::Value approach = det.Get("approach");
+            if (approach.IsNumber()) {
+                detection.approach = approach.As<Napi::Number>().FloatValue();
+                detection.hasAffect = true;
+            }
             state.detections.push_back(std::move(detection));
         }
     }
@@ -460,6 +581,25 @@ WorldState ParseWorldState(Napi::Env env, const Napi::Value& value) {
         if (!IsMissing(hunger)) {
             state.interaction.hasHungerLevel = true;
             ReadFloat(hunger, 0.5f, state.interaction.hungerLevel);
+        }
+        // Affect supplied by the environment.
+        Napi::Value valence = interaction.Get("valence");
+        if (valence.IsNumber()) {
+            state.interaction.valence = valence.As<Napi::Number>().FloatValue();
+            state.interaction.hasValence = true;
+            state.interaction.hasAffect = true;
+        }
+        Napi::Value arousal = interaction.Get("arousal");
+        if (arousal.IsNumber()) {
+            state.interaction.arousal = arousal.As<Napi::Number>().FloatValue();
+            state.interaction.hasArousal = true;
+            state.interaction.hasAffect = true;
+        }
+        Napi::Value approach = interaction.Get("approach");
+        if (approach.IsNumber()) {
+            state.interaction.approach = approach.As<Napi::Number>().FloatValue();
+            state.interaction.hasApproach = true;
+            state.interaction.hasAffect = true;
         }
     }
 
@@ -572,6 +712,7 @@ private:
     Napi::Value GetThreshold(const Napi::CallbackInfo& info);
     Napi::Value GetDecayRate(const Napi::CallbackInfo& info);
     Napi::Value GetFiredAt(const Napi::CallbackInfo& info);
+    Napi::Value GetFiredTick(const Napi::CallbackInfo& info);
     Napi::Value GetInhibitory(const Napi::CallbackInfo& info);
     Napi::Value GetSynapseTargets(const Napi::CallbackInfo& info);
     Napi::Value GetSynapseWeights(const Napi::CallbackInfo& info);
@@ -607,6 +748,7 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
         InstanceAccessor("threshold", &EngineWrap::GetThreshold, nullptr),
         InstanceAccessor("decayRate", &EngineWrap::GetDecayRate, nullptr),
         InstanceAccessor("firedAt", &EngineWrap::GetFiredAt, nullptr),
+        InstanceAccessor("firedTick", &EngineWrap::GetFiredTick, nullptr),
         InstanceAccessor("inhibitory", &EngineWrap::GetInhibitory, nullptr),
         InstanceAccessor("synapseTargets", &EngineWrap::GetSynapseTargets, nullptr),
         InstanceAccessor("synapseWeights", &EngineWrap::GetSynapseWeights, nullptr),
@@ -820,6 +962,7 @@ Napi::Value EngineWrap::Snapshot(const Napi::CallbackInfo& info) {
     out.Set("threshold", CopyFloat32(env, engine_->threshold));
     out.Set("decayRate", CopyFloat32(env, engine_->decayRate));
     out.Set("firedAt", CopyFloat64(env, engine_->firedAt));
+    out.Set("firedTick", CopyInt64(env, engine_->firedTick));
     out.Set("inhibitory", CopyUint8(env, engine_->inhibitory));
     out.Set("synapseTargets", CopyUint32(env, engine_->synapseTargets));
     out.Set("synapseWeights", CopyFloat32(env, engine_->synapseWeights));
@@ -850,6 +993,7 @@ Napi::Value EngineWrap::Restore(const Napi::CallbackInfo& info) {
         !RestoreFloat32(env, snapshot.Get("threshold"), engine_->threshold, "threshold") ||
         !RestoreFloat32(env, snapshot.Get("decayRate"), engine_->decayRate, "decayRate") ||
         !RestoreFloat64(env, snapshot.Get("firedAt"), engine_->firedAt, "firedAt") ||
+        !RestoreInt64(env, snapshot.Get("firedTick"), engine_->firedTick, "firedTick") ||
         !RestoreUint8(env, snapshot.Get("inhibitory"), engine_->inhibitory, "inhibitory") ||
         !RestoreUint32(env, snapshot.Get("synapseTargets"), engine_->synapseTargets, "synapseTargets") ||
         !RestoreFloat32(env, snapshot.Get("synapseWeights"), engine_->synapseWeights, "synapseWeights") ||
@@ -924,6 +1068,14 @@ NEUROPILE_VIEW_GETTER(GetSynapseCounts, synapseCounts, napi_uint32_array, uint32
 
 #undef NEUROPILE_VIEW_GETTER
 
+// The tick on which each neuron last fired. Exposed as a BigInt64Array
+// because the values are 64-bit.
+Napi::Value EngineWrap::GetFiredTick(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (engine_ == nullptr) return env.Null();
+    return Napi::Value(env, CopyInt64(env, engine_->firedTick));
+}
+
 Napi::Value EngineWrap::Now(const Napi::CallbackInfo& info) {
     return Napi::Number::New(info.Env(), NeuralEngine::nowMs());
 }
@@ -947,6 +1099,7 @@ private:
     Napi::Value Punish(const Napi::CallbackInfo& info);
     Napi::Value SetNeeds(const Napi::CallbackInfo& info);
     Napi::Value GetNeeds(const Napi::CallbackInfo& info);
+    Napi::Value DefineDrives(const Napi::CallbackInfo& info);
     Napi::Value GetBody(const Napi::CallbackInfo& info);
     Napi::Value GetMotorState(const Napi::CallbackInfo& info);
     Napi::Value SetBody(const Napi::CallbackInfo& info);
@@ -1018,6 +1171,7 @@ Napi::Object BrainWrap::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("reward", &BrainWrap::Reward),
         InstanceMethod("punish", &BrainWrap::Punish),
         InstanceMethod("setNeeds", &BrainWrap::SetNeeds),
+        InstanceMethod("defineDrives", &BrainWrap::DefineDrives),
         InstanceMethod("getNeeds", &BrainWrap::GetNeeds),
         InstanceMethod("getBody", &BrainWrap::GetBody),
         InstanceMethod("getMotorState", &BrainWrap::GetMotorState),
@@ -1192,6 +1346,11 @@ BrainWrap::BrainWrap(const Napi::CallbackInfo& info)
             options.hasSeed = true;
             options.seed = seed;
         }
+        // The homeostatic drives this body has. Declared by the caller,
+        // because the drives belong to the body rather than to the brain.
+        if (GetObjectProperty(input, "drives", value) && value.IsObject()) {
+            options.drives = ParseDriveSchema(value.As<Napi::Object>());
+        }
     }
 
     core_ = new BrainCore(options);
@@ -1255,18 +1414,42 @@ Napi::Value BrainWrap::Punish(const Napi::CallbackInfo& info) {
 Napi::Value BrainWrap::SetNeeds(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     if (core_ == nullptr) return env.Undefined();
-    Needs needs = core_->getNeeds();
+    std::vector<std::pair<std::string, float>> needs;
     if (info.Length() >= 1 && info[0].IsObject()) {
         Napi::Object input = info[0].As<Napi::Object>();
-        ReadFloat(input.Get("hunger"), needs.hunger, needs.hunger);
-        ReadFloat(input.Get("energy"), needs.energy, needs.energy);
-        ReadFloat(input.Get("joy"), needs.joy, needs.joy);
+        Napi::Array names = input.GetPropertyNames();
+        for (uint32_t i = 0; i < names.Length(); ++i) {
+            Napi::Value nameValue = names.Get(i);
+            if (!nameValue.IsString()) continue;
+            const std::string name = nameValue.As<Napi::String>().Utf8Value();
+            float value = 0.5f;
+            ReadFloat(input.Get(name), value, value);
+            needs.emplace_back(name, value);
+        }
     }
-    return NeedsObject(env, core_->setNeeds(needs));
+    core_->setNeeds(needs);
+    return NeedsObject(env, core_->getDrivesValues());
 }
 
 Napi::Value BrainWrap::GetNeeds(const Napi::CallbackInfo& info) {
-    return NeedsObject(info.Env(), core_->getNeeds());
+    return NeedsObject(info.Env(), core_->getDrivesValues());
+}
+
+Napi::Value BrainWrap::DefineDrives(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (core_ == nullptr) return env.Undefined();
+    if (info.Length() < 1 || !info[0].IsObject()) {
+        return TypeFailure(env, "defineDrives(schema) expects an object");
+    }
+
+    const std::vector<std::string> names = core_->defineDrives(
+        ParseDriveSchema(info[0].As<Napi::Object>()));
+
+    Napi::Array out = Napi::Array::New(env, names.size());
+    for (size_t i = 0; i < names.size(); ++i) {
+        out.Set(static_cast<uint32_t>(i), Napi::String::New(env, names[i]));
+    }
+    return out;
 }
 
 Napi::Value BrainWrap::GetBody(const Napi::CallbackInfo& info) {
@@ -1393,7 +1576,8 @@ Napi::Value BrainWrap::HandleInteraction(const Napi::CallbackInfo& info) {
     }
     float intensity = 1.0f;
     ReadFloat(info[1], 1.0f, intensity);
-    return NeedsObject(env, core_->handleInteraction(info[0].As<Napi::String>().Utf8Value(), intensity));
+    core_->handleInteraction(info[0].As<Napi::String>().Utf8Value(), intensity);
+    return NeedsObject(env, core_->getDrivesValues());
 }
 
 Napi::Value BrainWrap::AmygdalaActivate(const Napi::CallbackInfo& info) {
@@ -1675,6 +1859,7 @@ Napi::Value BrainWrap::Snapshot(const Napi::CallbackInfo& info) {
     engineSnapshot.Set("threshold", CopyFloat32(env, engine.threshold));
     engineSnapshot.Set("decayRate", CopyFloat32(env, engine.decayRate));
     engineSnapshot.Set("firedAt", CopyFloat64(env, engine.firedAt));
+    engineSnapshot.Set("firedTick", CopyInt64(env, engine.firedTick));
     engineSnapshot.Set("inhibitory", CopyUint8(env, engine.inhibitory));
     engineSnapshot.Set("synapseTargets", CopyUint32(env, engine.synapseTargets));
     engineSnapshot.Set("synapseWeights", CopyFloat32(env, engine.synapseWeights));
@@ -1690,7 +1875,7 @@ Napi::Value BrainWrap::Snapshot(const Napi::CallbackInfo& info) {
     state.Set("valence", Napi::Number::New(env, core_->valence()));
     state.Set("arousal", Napi::Number::New(env, core_->arousal()));
     state.Set("drive", Napi::Number::New(env, core_->drive()));
-    state.Set("needs", NeedsObject(env, core_->getNeeds()));
+    state.Set("needs", NeedsObject(env, core_->getDrivesValues()));
     state.Set("body", BodyObject(env, core_->getBody()));
     state.Set("motorState", MotorStateObject(env, core_->getMotorState()));
     state.Set("lastFood", env.Null());
@@ -1839,6 +2024,7 @@ Napi::Value BrainWrap::Restore(const Napi::CallbackInfo& info) {
         !RestoreFloat32(env, engineSnapshot.Get("threshold"), engine.threshold, "threshold") ||
         !RestoreFloat32(env, engineSnapshot.Get("decayRate"), engine.decayRate, "decayRate") ||
         !RestoreFloat64(env, engineSnapshot.Get("firedAt"), engine.firedAt, "firedAt") ||
+        !RestoreInt64(env, engineSnapshot.Get("firedTick"), engine.firedTick, "firedTick") ||
         !RestoreUint8(env, engineSnapshot.Get("inhibitory"), engine.inhibitory, "inhibitory") ||
         !RestoreUint32(env, engineSnapshot.Get("synapseTargets"), engine.synapseTargets, "synapseTargets") ||
         !RestoreFloat32(env, engineSnapshot.Get("synapseWeights"), engine.synapseWeights, "synapseWeights") ||
@@ -1872,11 +2058,17 @@ Napi::Value BrainWrap::Restore(const Napi::CallbackInfo& info) {
 
         Napi::Value needsValue = state.Get("needs");
         if (needsValue.IsObject()) {
-            Needs needs = core_->getNeeds();
             Napi::Object needsObject = needsValue.As<Napi::Object>();
-            ReadFloat(needsObject.Get("hunger"), needs.hunger, needs.hunger);
-            ReadFloat(needsObject.Get("energy"), needs.energy, needs.energy);
-            ReadFloat(needsObject.Get("joy"), needs.joy, needs.joy);
+            Napi::Array names = needsObject.GetPropertyNames();
+            std::vector<std::pair<std::string, float>> needs;
+            for (uint32_t i = 0; i < names.Length(); ++i) {
+                Napi::Value nameValue = names.Get(i);
+                if (!nameValue.IsString()) continue;
+                const std::string name = nameValue.As<Napi::String>().Utf8Value();
+                float value = 0.5f;
+                ReadFloat(needsObject.Get(name), value, value);
+                needs.emplace_back(name, value);
+            }
             core_->setNeeds(needs);
         }
 
@@ -2061,7 +2253,7 @@ Napi::Value BrainWrap::GetDrive(const Napi::CallbackInfo& info) {
 }
 
 Napi::Value BrainWrap::GetNeedsProperty(const Napi::CallbackInfo& info) {
-    return NeedsObject(info.Env(), core_ ? core_->getNeeds() : Needs{});
+    return NeedsObject(info.Env(), core_ ? core_->getDrivesValues() : std::vector<std::pair<std::string, float>>{});
 }
 
 Napi::Value BrainWrap::GetBodyProperty(const Napi::CallbackInfo& info) {

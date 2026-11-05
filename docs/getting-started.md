@@ -137,20 +137,31 @@ appropriate regions.
 ```js
 brain.integrateWorldState({
   body: { x: 0.5, y: 0.4, speed: 0.2 },
-  needs: { hunger: 0.3, energy: 0.6, joy: 0.7 },
+  needs: { fuel: 0.3 },
   detections: [{ label: 'food', w: 0.8 }],
-  interaction: { note: 'feed', x: 0.5, y: 0.4 },
+  interaction: { label: 'feed', x: 0.5, y: 0.4 },
 });
 ```
 
 | Field | Effect |
 | --- | --- |
 | `body` | Position, heading, speed. Drives spatial neurons and border alarm. |
-| `needs` | `hunger`, `energy`, `joy` (0..1). Low needs become distress signals. |
-| `detections` | `{ label, w }` objects. Labels are hashed into visual neurons. |
-| `interaction` | `{ note }` — `feed`, `rest`, `poke`, `danger` are handled specially. |
+| `needs` | Drive values, by name. Only the drives the body declared. |
+| `detections` | `{ label, w }` objects. Labels are hashed into visual neurons. Add `valence`, `arousal`, `approach` to tell the brain what a thing is worth. |
+| `interaction` | `{ label }` or `{ note }`. `label` is what satisfies a drive. Add `valence`, `arousal`, `approach` to describe how the event felt. |
 | `opticFlow` | `{ x, y, magnitude }` — visual motion. |
 | `motorHint` | `{ x, y, intensity }` — a suggested direction, used by `selfAwareness()`. |
+
+A new brain has no opinions about anything. If you want it to fear a wolf,
+you say so with `valence`:
+
+```js
+brain.integrateWorldState({
+  detections: [
+    { label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8, approach: -1.0 },
+  ],
+});
+```
 
 ## Memory
 
@@ -194,6 +205,80 @@ console.log(brain.activeConcepts(5));
 
 The third argument is the emotional vector, the fourth is an action label,
 and the fifth is the learning strength (0..1).
+
+A new brain has no concepts. `emotionOf('ember')` returns `null` until the
+brain has met the word.
+
+## Grounding
+
+Grounding is where the world teaches the brain. It binds things to
+concepts, and it lets what the brain learns **generalise** to things it
+has never been told about.
+
+```js
+// This thing is hot and it hurts.
+brain.ground('ember', {
+  features: { hot: 1.0, burning: 0.9, orange: 0.2 },
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+// A different word, but the same features.
+brain.ground('flame', { features: { hot: 1.0, burning: 0.9, orange: 0.2 } });
+
+console.log(brain.emotionOf('flame')); // { valence: -0.476, ... }
+```
+
+The brain never learned that flame is a word for fire. It learned that
+things which are hot and burning hurt, and flame shares those features.
+
+The weights decide how much a shared feature counts, so a feature that
+belongs to things which should not share an opinion can be given a smaller
+say:
+
+```js
+brain.ground('pebble', { features: { grey: 0.2, hard: 0.9 } });
+console.log(brain.emotionOf('pebble')); // near neutral
+```
+
+Things seen together become related:
+
+```js
+brain.coOccur(['wolf', 'sheep']);
+
+console.log(brain.relatedness('wolf', 'sheep')); // 1.0
+console.log(brain.nearest('wolf'));               // [{ label: 'sheep', ... }]
+```
+
+## Drives
+
+Homeostatic drives belong to the body, so you declare them when you build
+the brain. A brain with none declared has no needs at all.
+
+```js
+const brain = new Brain({
+  sizeGB: 0.05,
+  drives: {
+    fuel: {
+      decay: 0.01,       // how much it falls per tick
+      threshold: 0.3,    // below this it starts to hurt
+      critical: 0.1,     // below this it is an emergency
+      effort: 0.004,     // what movement costs it
+      satisfiedBy: ['diesel', 'charging-station'],
+    },
+    coolant: { satisfiedBy: 'coolant' },
+  },
+});
+```
+
+The world satisfies them using its own vocabulary:
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'diesel', x: 0.8, y: 0.2, valence: 0.7 },
+});
+
+console.log(brain.getNeeds().fuel);  // restored
+```
 
 ## Working memory
 

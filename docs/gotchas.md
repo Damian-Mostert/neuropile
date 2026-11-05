@@ -3,6 +3,8 @@
 The behaviours that surprise people. Read this before debugging something that
 "should" have worked.
 
+- [A new brain knows nothing](#a-new-brain-knows-nothing)
+- [A new brain has no needs](#a-new-brain-has-no-needs)
 - [Growth numbers are not exact](#growth-numbers-are-not-exact)
 - [`hear()` also remembers](#hear-also-remembers)
 - [Memories do not decay on their own](#memories-do-not-decay-on-their-own)
@@ -15,6 +17,102 @@ The behaviours that surprise people. Read this before debugging something that
 - [Growth reallocates the whole engine](#growth-reallocates-the-whole-engine)
 - [The brain is stochastic without a seed](#the-brain-is-stochastic-without-a-seed)
 - [Typing is a string, not a number](#typing-is-a-string-not-a-number)
+- [Small inputs do not move the network](#small-inputs-do-not-move-the-network)
+
+---
+
+## A new brain knows nothing
+
+A brain that has experienced nothing has no concepts, no opinions, and no
+affect. This surprises people who expect "brain" to come pre-loaded.
+
+```js
+const brain = new Brain({ neurons: 5000 });
+
+brain.emotionOf('danger');  // null
+brain.emotionOf('safe');    // null
+brain.emotionOf('food');    // null
+```
+
+That is deliberate. Whether something is good or bad is a fact about the
+world the brain was put in, not a fact about brains, so the world supplies
+it. Two ways to do that:
+
+```js
+// Say what a thing is worth, and what it feels like.
+brain.ground('wolf', {
+  features: ['grey', 'wild'],
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+// Or say it as the brain perceives it.
+brain.integrateWorldState({
+  detections: [{ label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8 }],
+});
+```
+
+Because the affect attaches to the **features**, it transfers. Teach the
+brain that "hot, burning" hurts and it will fear anything else with those
+features, including words it has never seen.
+
+---
+
+## Small inputs do not move the network
+
+Perceiving a handful of neurons barely reaches the rest of the brain. A
+pattern needs to be rich enough to drive activity across regions, or
+nothing co-activates and nothing is learned.
+
+```js
+// Barely does anything.
+brain.perceive(new Uint32Array([1, 2, 3]));
+
+// Spreads through the network and starts learning.
+const pattern = new Uint32Array(200);
+for (let i = 0; i < pattern.length; i++) pattern[i] = (i * 7 + 3) % 400000;
+brain.perceive(pattern);
+```
+
+`hear()` and `remember()` already produce rich-enough patterns, so they are
+the easy path if you just want to watch the brain learn.
+
+---
+
+## A new brain has no needs
+
+Drives belong to the body, so a brain that was not given any has none.
+`getNeeds()` returns an empty object, and setting a drive the body does
+not have does nothing.
+
+```js
+const brain = new Brain({ neurons: 5000 });
+
+brain.getNeeds();            // {}
+brain.setNeeds({ hunger: 0.2 });
+brain.getNeeds();            // {} - there is no hunger drive
+```
+
+Declare them when you build the brain:
+
+```js
+const brain = new Brain({
+  neurons: 5000,
+  drives: {
+    hunger: { threshold: 0.4, satisfiedBy: ['feed'] },
+    energy: { threshold: 0.3, satisfiedBy: ['rest'] },
+  },
+});
+```
+
+The same rule applies to interactions: there is no built-in vocabulary. What
+satisfies a drive is whatever the schema says, matched against the
+interaction's `label` (or its `note` when there is no label).
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'feed', x: 0.5, y: 0.5, valence: 0.6 },
+});
+```
 
 ---
 

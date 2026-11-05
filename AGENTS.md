@@ -43,6 +43,51 @@ explicitly if you need an exact count.
 
 Full details in `docs/gotchas.md`.
 
+## The design principle
+
+**The brain ships with structure and no opinions. The world supplies the
+opinions.**
+
+This is the rule everything else follows from:
+
+- There are no seeded concepts. A new brain has zero, and
+  `emotionOf('danger')` returns `null`.
+- Nothing is good or bad until the environment says so, through
+  `brain.ground()` or through `valence` / `arousal` / `approach` on a
+  detection or interaction.
+- Affect attaches to **features**, not words, so it generalises. Teach the
+  brain that "hot, burning" hurts and it will fear a word it has never been
+  told about, as long as that word shares the features.
+- Relatedness is learned from co-occurrence, never declared.
+- **Drives belong to the body, not the brain.** A brain has no needs until
+  the caller declares them. There is no built-in hunger, energy, or joy,
+  and no built-in food.
+
+If you add a behaviour that assumes a good thing or a bad thing, it belongs
+in the world description, not in the brain.
+
+## Declaring drives
+
+`lib/drives.js` and the `Drive` struct in `src/neuropile_core.hpp` hold the
+homeostatic system. A drive declares how fast it decays, when it starts to
+hurt, when it is an emergency, what movement costs it, and what satisfies it.
+
+The vocabulary that satisfies a drive comes from the schema, so a world can
+use any words it likes. `satisfiedBy` is matched against an interaction's
+`label`, or its `note` when no label is given.
+
+```js
+new Brain({
+  drives: {
+    fuel: { decay: 0.01, threshold: 0.3, satisfiedBy: ['diesel'] },
+  },
+});
+```
+
+Unknown drive names are ignored rather than silently created: a body
+cannot have a drive it never declared.
+
+
 ## The API shape you need to know
 
 ```js
@@ -64,6 +109,28 @@ brain.context();  // compact text block for an LLM prompt
 - `createCore(options)` picks native or JS using the same logic as `Brain`.
 - `brain.native` tells you which core is active. `nativeAvailable` is a
   module-level boolean.
+- `Grounding` is the layer that binds the world to concepts.
+
+## How the substrate learns
+
+Hebbian plasticity runs on co-activation alone. Dopamine modulates the
+learning rate rather than gating it, so a brain that has merely watched the
+world has already changed.
+
+The co-activation window is measured in **ticks**, not wall-clock time.
+This is deliberate: a wall-clock window meant learning depended on how fast
+the host happened to be running. Keep it in ticks.
+
+Two things make the substrate actually learn, and both are easy to break:
+
+- **`inject()` must fire.** It used to only raise the membrane potential,
+  so a stimulus arriving through `inject()` never spiked and never learned.
+- **Wiring must be evenly distributed.** `_wireRegions` used to pick source
+  neurons at random, which left most of them with no outgoing synapse.
+  Activity could not propagate.
+
+A pattern also has to be rich enough to move the network. A handful of
+indices is not enough for anything to co-activate.
 
 ## Conventions in this codebase
 
@@ -78,6 +145,13 @@ brain.context();  // compact text block for an LLM prompt
 - **The native addon version is synced from `package.json` at load time** in
   `index.js`. Do not hardcode a version string in `src/addon.cpp`.
 - **Comments explain *why*, not *what*.** Match the existing tone.
+- **`lib/patterns.js` and `soundPattern()` in the native core must agree
+  exactly.** There is a test asserting it. The encoding is a sparse
+  distributed code, not a hash, because a hash cannot represent similarity
+  and therefore cannot support learning that generalises.
+- **Do not hoist arrays out of loops by accident, and do not index into
+  `brain.engine.synapseWeights` in a loop.** Each access crosses the native
+  boundary. Copy it once with `Float32Array.from(...)` and compare the copy.
 
 ## Working on this repo
 
@@ -130,3 +204,16 @@ workflow keys off the version in `package.json`.
 - Do not hardcode values that already have a default in one place.
 - Do not rename the `engine`, `regions`, or `core` properties — they are
   public API.
+- **Do not seed concepts or opinions.** No built-in list of good and bad
+  words, no built-in reward for any particular label. If the brain needs to
+  know that something is pleasant, the world tells it.
+- **Do not hardcode needs, drives, or what satisfies them.** There is no
+  built-in hunger, energy, joy, or food. The body declares its drives and
+  the world says what satisfies them.
+- **Do not gate plasticity behind dopamine.** Co-activation is sufficient on
+  its own. Reward and punishment modulate the rate; they do not enable it.
+- **Do not use wall-clock time for simulation windows.** Anything the
+  simulation reasons about — refractory periods, co-activation, decay —
+  should be measured in ticks, so behaviour does not depend on how fast the
+  host is running.
+

@@ -8,10 +8,140 @@ Copy-paste recipes for common tasks. Each one is complete and runnable.
 - [An HTTP service over a brain](#an-http-service-over-a-brain)
 - [A character that learns words](#a-character-that-learns-words)
 - [A character with opinions](#a-character-with-opinions)
+- [Teaching a brain about your world](#teaching-a-brain-about-your-world)
+- [Giving the body drives](#giving-the-body-drives)
 - [Growing a brain over time](#growing-a-brain-over-time)
 - [Persistent agents](#persistent-agents)
 - [Embedding in an existing app](#embedding-in-an-existing-app)
 - [Testing](#testing)
+
+---
+
+## Teaching a brain about your world
+
+A new brain has no opinions. It does not think `wolf` is frightening or
+`lamb` is tasty, because those are facts about the world, not about brains.
+You supply them.
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.05 });
+
+// Tell the brain what these things are worth, and what they feel like.
+// Features are given as a map so you can say how much each one counts.
+brain.ground('wolf', {
+  features: { grey: 0.2, wild: 1.0, quadruped: 0.7, howls: 0.9 },
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('lamb', {
+  features: { white: 0.2, tame: 1.0, quadruped: 0.7, bleats: 0.9 },
+  valence: 0.7, arousal: 0.2, approach: 0.8,
+});
+```
+
+The brain now has opinions. More usefully, it has opinions that
+**generalise**. The next animal you mention that shares features with the
+wolf is treated as dangerous too, even if you never said so:
+
+```js
+// The brain has never heard of "jackal", but it shares features with the
+// wolf, so it inherits the fear.
+brain.ground('jackal', { features: { grey: 0.2, wild: 1.0, quadruped: 0.7 } });
+
+brain.emotionOf('jackal');  // { valence: -0.18, ... }
+```
+
+That is the point of `features`. If you only ever taught the brain about
+words, it would only ever know about words. Teach it about features and it
+can apply what it learned to things it has never been told about.
+
+The weights matter. A pebble is also grey, but grey is a weak feature, so
+the wolf's fear barely reaches it:
+
+```js
+brain.ground('pebble', { features: { grey: 0.2, hard: 0.9 } });
+
+brain.emotionOf('pebble');  // near neutral
+```
+
+Relatedness is learned from things being seen together, not declared:
+
+```js
+// Wolves and sheep keep turning up in the same place.
+for (let i = 0; i < 10; i++) {
+  brain.ground('wolf', { features: { grey: 0.2, wild: 1.0 } });
+  brain.ground('sheep', { features: { white: 0.2, tame: 1.0 } });
+  brain.coOccur(['wolf', 'sheep']);
+}
+
+brain.relatedness('wolf', 'sheep');  // 1.0
+brain.relatedness('wolf', 'stone');  // 0.0
+```
+
+### Telling the brain what just happened
+
+The same principle applies to events. You do not need to use the built-in
+vocabulary:
+
+```js
+brain.integrateWorldState({
+  detections: [
+    { label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8, approach: -1.0 },
+    { label: 'lamb', w: 0.6, valence: 0.7, arousal: 0.2, approach: 0.8 },
+  ],
+  interaction: {
+    note: 'the wolf lunged',
+    valence: -0.8,
+    arousal: 0.9,
+  },
+});
+
+brain.tick(3);
+brain.emotionalState();  // the brain is now afraid
+```
+
+### Giving the body drives
+
+Drives belong to the body, so you declare them when you build the brain. A
+brain with no drives has no needs at all.
+
+```js
+const brain = new Brain({
+  sizeGB: 0.05,
+  drives: {
+    fuel: {
+      decay: 0.01,
+      threshold: 0.3,
+      critical: 0.1,
+      satisfiedBy: ['diesel', 'charging-station'],
+      effort: 0.004,   // movement costs fuel
+    },
+    coolant: {
+      decay: 0.005,
+      threshold: 0.4,
+      satisfiedBy: 'coolant',
+    },
+  },
+});
+
+console.log(brain.getNeeds());  // { fuel: 0.5, coolant: 0.5 }
+```
+
+The world satisfies them using its own vocabulary:
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'diesel', x: 0.8, y: 0.2, valence: 0.7 },
+});
+
+console.log(brain.getNeeds().fuel);  // restored
+```
+
+When fuel falls below its threshold the brain feels it, and when it falls
+below the critical threshold it is an emergency. The most pressing drive
+pulls the motor system toward wherever the satisfying thing was last seen.
 
 ---
 
@@ -239,7 +369,6 @@ independent sources. One unverified claim is not enough.
 ---
 
 ## Growing a brain over time
-
 ```js
 const brain = new Brain({
   startNeurons: 20000,

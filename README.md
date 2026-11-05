@@ -67,12 +67,24 @@ them automatically.
 - **Native core** — spiking neurons, region wiring, neuromodulators, needs,
   affect, motor intent, sensory encoding, and consolidation in C++17 via
   Node-API.
+- **Learns from experience** — Hebbian plasticity runs on co-activation
+  alone. A brain that has merely watched the world has already changed.
+  Reward and punishment modulate the learning rate rather than gating it.
+- **Starts blank** — no seeded concepts and no built-in opinions. Whether
+  something is good or bad is a fact about your world, so your world
+  supplies it. Affect attaches to *features*, so what the brain learns
+  transfers to things it has never been told about.
+- **Drives belong to the body** — a brain has no needs until you declare
+  them. A rover gets `fuel` and `coolant`; a pet gets `hunger` and
+  `energy`. The schema decides how fast each one decays, when it starts to
+  hurt, what movement costs it, and what satisfies it.
 - **Growth** — neurogenesis. The brain starts at a size you choose and grows
   toward a ceiling, wiring new neurons in as it goes without losing anything
   it has already learned.
 - **Pure-JS fallback** — the same API works with no compiler installed.
-- **Cognitive layers** — associative memory, concepts, working memory, a
-  parameter genome, metacognition, homeostasis, and explicit beliefs.
+- **Cognitive layers** — associative memory, grounding, concepts, working
+  memory, a parameter genome, metacognition, homeostasis, and explicit
+  beliefs.
 - **Persistence** — full snapshot/restore, gzip-compressed save/load.
 - **Zero runtime dependencies** apart from `node-addon-api`, which is only
   needed to build.
@@ -162,6 +174,8 @@ sensory / vision / audio
         ├── emotionalState / behaviorState / motorIntent
         │
         ├── MemoryCortex      associative, decaying, reafference-biased
+        ├── Grounding         binds world things to concepts; learns
+        │                    relatedness and feature-level affect
         ├── ConceptNet        sensory + emotional grounding of words
         ├── WorkingMemory     7 attention slots + shared focus
         ├── Genome            tunable personality/plasticity parameters
@@ -174,6 +188,106 @@ The important part is the arrow going *back up*. Memory recall is biased by
 `core.reafference()` — the neurons that are firing right now prefer memories
 whose encoding pattern overlaps with them. That coupling is what makes the
 simulation drive cognition instead of sitting politely beside it.
+
+### The brain learns by itself
+
+Hebbian plasticity runs on co-activation alone. Dopamine modulates the
+learning rate rather than gating it, so a brain that has merely watched the
+world has already changed — whether or not anyone scored the outcome.
+
+The co-activation window is measured in ticks, not wall-clock time, so
+learning behaves the same whether you tick at 1 Hz or 1 kHz.
+
+### The brain starts blank
+
+There are no seeded concepts and no built-in opinions. `emotionOf('danger')`
+returns `null` on a new brain, because whether something is good or bad is
+a fact about the world, not a fact about brains.
+
+You supply the facts, and they attach to **features**, so they transfer:
+
+```js
+const brain = new Brain({ sizeGB: 0.05 });
+
+// This thing is hot and it hurts.
+brain.ground('ember', {
+  features: { hot: 1.0, burning: 0.9, orange: 0.2 },
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+// A different word, but the same features.
+brain.ground('flame', { features: { hot: 1.0, burning: 0.9, orange: 0.2 } });
+
+brain.emotionOf('flame');  // { valence: -0.476, ... }
+```
+
+The brain never learned that flame is a word for fire. It learned that
+things which are hot and burning hurt, and flame shares those features.
+
+Feature weights decide how much a shared feature counts. A pebble is grey
+too, but grey is a weak feature, so the fear barely reaches it:
+
+```js
+brain.ground('pebble', { features: { grey: 0.2, hard: 0.9 } });
+brain.emotionOf('pebble');  // near neutral
+```
+
+Things seen together become related, without being declared related:
+
+```js
+brain.coOccur(['wolf', 'sheep']);
+
+brain.relatedness('wolf', 'sheep');  // 1.0
+brain.relatedness('wolf', 'stone');  // 0.0
+```
+
+### Telling the brain what it is perceiving
+
+`integrateWorldState` accepts affect on detections and interactions, so
+your environment can use any vocabulary it likes:
+
+```js
+brain.integrateWorldState({
+  detections: [
+    { label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8, approach: -1.0 },
+    { label: 'lamb', w: 0.6, valence: 0.7, arousal: 0.2, approach: 0.8 },
+  ],
+  interaction: { note: 'the wolf lunged', valence: -0.8, arousal: 0.9 },
+});
+```
+
+### Giving the body drives
+
+Homeostatic drives belong to the body, so you declare them. A brain with
+no drives has no needs at all.
+
+```js
+const brain = new Brain({
+  sizeGB: 0.05,
+  drives: {
+    fuel: {
+      decay: 0.01,      // how much it falls per tick
+      threshold: 0.3,   // below this it starts to hurt
+      critical: 0.1,    // below this it is an emergency
+      effort: 0.004,    // what movement costs it
+      satisfiedBy: ['diesel', 'charging-station'],
+    },
+    coolant: { satisfiedBy: 'coolant' },
+  },
+});
+
+brain.getNeeds();  // { fuel: 0.5, coolant: 0.5 }
+```
+
+The world satisfies them using its own vocabulary:
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'diesel', x: 0.8, y: 0.2, valence: 0.7 },
+});
+
+brain.getNeeds().fuel;  // restored
+```
 
 ### The 16 regions
 
@@ -456,12 +570,34 @@ Words are labels on experienced clusters. A concept accumulates sensory
 features, an emotional vector (`valence`, `arousal`, `approach`), and
 associations to other concepts.
 
+There are no seeded concepts. A new brain has none, and `activate()`
+returns `null` for a word it has never met.
+
 ```js
 brain.learn('ember', { bright: 0.9, hot: 0.8 }, { valence: 0.4 }, 'watch', 0.6);
 brain.associate('ember', 'fire', 0.4);
 brain.emotionOf('ember');
 brain.activeConcepts(5);
 brain.netEmotion();
+```
+
+### Grounding
+
+Binds things in the world to concepts, and learns how they relate. This is
+the layer that makes the brain's opinions transferable.
+
+```js
+brain.ground('ember', {
+  features: ['hot', 'burning', 'orange'],
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('flame', { features: ['hot', 'burning', 'orange'] });
+brain.emotionOf('flame');   // inherits the fear
+
+brain.coOccur(['wolf', 'sheep']);
+brain.relatedness('wolf', 'sheep');
+brain.nearest('wolf');
 ```
 
 ### WorkingMemory
@@ -536,6 +672,7 @@ npm run example:chat    # interactive chat loop
 npm run example:game    # agent wanders, gets hungry, eats
 npm run example:http    # JSON HTTP API on :8787
 npm run example:growth  # neurogenesis demo
+npm run example:teaching # teach a blank brain about a world
 npm run benchmark       # native vs JS comparison
 ```
 
@@ -569,10 +706,12 @@ The HTTP server exposes:
 | `NeuralEngine` | The JavaScript spiking engine. |
 | `NativeNeuralEngine` | The native engine, or `null` if unavailable. |
 | `MemoryCortex`, `ConceptNet`, `WorkingMemory` | Cognitive layers. |
+| `Grounding` | Binds world things to concepts; learns relatedness and feature-level affect. |
 | `Genome`, `Metacognition`, `Homeostasis` | Adaptation layers. |
 | `BeliefStore` | Explicit belief layer. |
 | `createCore(options)` | Build a standalone core with the standard selection logic. |
-| `soundPattern(text, size)` | Hash text into a sensory pattern. |
+| `soundPattern(text, size)` | Encode text as a sparse distributed pattern. |
+| `patternOverlap(a, b)`, `containment(a, b)` | Compare two encoded patterns. |
 | `labelHash(label)` | Deterministic hash used for detection labels. |
 | `persistence` | `save`, `load`, `saveAsync`, `loadAsync`, and the codecs. |
 | `save`, `load` | Top-level shortcuts for `persistence.save` / `persistence.load`. |
@@ -811,13 +950,14 @@ lib/
   index.js -> brain.js the JS core
   engine.js            the JS spiking engine
   memory.js            MemoryCortex
+  grounding.js         Grounding
   concepts.js          ConceptNet
   working-memory.js    WorkingMemory
   genome.js            Genome
   metacognition.js     Metacognition
   homeostasis.js       Homeostasis
   beliefs.js           BeliefStore
-  patterns.js          sensory hashing
+  patterns.js          sparse distributed sensory codes
   persistence.js       snapshot codecs + save/load
 scripts/
   no-native.js         fallback message when the addon cannot be built

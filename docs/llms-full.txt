@@ -150,20 +150,31 @@ appropriate regions.
 ```js
 brain.integrateWorldState({
   body: { x: 0.5, y: 0.4, speed: 0.2 },
-  needs: { hunger: 0.3, energy: 0.6, joy: 0.7 },
+  needs: { fuel: 0.3 },
   detections: [{ label: 'food', w: 0.8 }],
-  interaction: { note: 'feed', x: 0.5, y: 0.4 },
+  interaction: { label: 'feed', x: 0.5, y: 0.4 },
 });
 ```
 
 | Field | Effect |
 | --- | --- |
 | `body` | Position, heading, speed. Drives spatial neurons and border alarm. |
-| `needs` | `hunger`, `energy`, `joy` (0..1). Low needs become distress signals. |
-| `detections` | `{ label, w }` objects. Labels are hashed into visual neurons. |
-| `interaction` | `{ note }` — `feed`, `rest`, `poke`, `danger` are handled specially. |
+| `needs` | Drive values, by name. Only the drives the body declared. |
+| `detections` | `{ label, w }` objects. Labels are hashed into visual neurons. Add `valence`, `arousal`, `approach` to tell the brain what a thing is worth. |
+| `interaction` | `{ label }` or `{ note }`. `label` is what satisfies a drive. Add `valence`, `arousal`, `approach` to describe how the event felt. |
 | `opticFlow` | `{ x, y, magnitude }` — visual motion. |
 | `motorHint` | `{ x, y, intensity }` — a suggested direction, used by `selfAwareness()`. |
+
+A new brain has no opinions about anything. If you want it to fear a wolf,
+you say so with `valence`:
+
+```js
+brain.integrateWorldState({
+  detections: [
+    { label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8, approach: -1.0 },
+  ],
+});
+```
 
 ## Memory
 
@@ -207,6 +218,80 @@ console.log(brain.activeConcepts(5));
 
 The third argument is the emotional vector, the fourth is an action label,
 and the fifth is the learning strength (0..1).
+
+A new brain has no concepts. `emotionOf('ember')` returns `null` until the
+brain has met the word.
+
+## Grounding
+
+Grounding is where the world teaches the brain. It binds things to
+concepts, and it lets what the brain learns **generalise** to things it
+has never been told about.
+
+```js
+// This thing is hot and it hurts.
+brain.ground('ember', {
+  features: { hot: 1.0, burning: 0.9, orange: 0.2 },
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+// A different word, but the same features.
+brain.ground('flame', { features: { hot: 1.0, burning: 0.9, orange: 0.2 } });
+
+console.log(brain.emotionOf('flame')); // { valence: -0.476, ... }
+```
+
+The brain never learned that flame is a word for fire. It learned that
+things which are hot and burning hurt, and flame shares those features.
+
+The weights decide how much a shared feature counts, so a feature that
+belongs to things which should not share an opinion can be given a smaller
+say:
+
+```js
+brain.ground('pebble', { features: { grey: 0.2, hard: 0.9 } });
+console.log(brain.emotionOf('pebble')); // near neutral
+```
+
+Things seen together become related:
+
+```js
+brain.coOccur(['wolf', 'sheep']);
+
+console.log(brain.relatedness('wolf', 'sheep')); // 1.0
+console.log(brain.nearest('wolf'));               // [{ label: 'sheep', ... }]
+```
+
+## Drives
+
+Homeostatic drives belong to the body, so you declare them when you build
+the brain. A brain with none declared has no needs at all.
+
+```js
+const brain = new Brain({
+  sizeGB: 0.05,
+  drives: {
+    fuel: {
+      decay: 0.01,       // how much it falls per tick
+      threshold: 0.3,    // below this it starts to hurt
+      critical: 0.1,     // below this it is an emergency
+      effort: 0.004,     // what movement costs it
+      satisfiedBy: ['diesel', 'charging-station'],
+    },
+    coolant: { satisfiedBy: 'coolant' },
+  },
+});
+```
+
+The world satisfies them using its own vocabulary:
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'diesel', x: 0.8, y: 0.2, valence: 0.7 },
+});
+
+console.log(brain.getNeeds().fuel);  // restored
+```
 
 ## Working memory
 
@@ -445,7 +530,7 @@ All read-only getters.
 | `valence` | number | Current emotional valence, roughly -1..1. |
 | `arousal` | number | Current arousal. |
 | `drive` | number | Current drive. |
-| `needs` | object | `{ hunger, energy, joy }`, each 0..1. |
+| `needs` | object | The value of each drive the body has, by name. Empty when the body declared none. |
 | `body` | object | `{ x, y, heading, speed, energy }`. |
 | `motorState` | object | `{ moveX, moveY, lastAction }`. |
 | `neuronCount` | number | Current neuron count. |
@@ -513,12 +598,67 @@ to disable reafference biasing), `reafferenceTopN` (default `20`).
 
 | Method | Returns | Description |
 | --- | --- | --- |
-| `activate(word, strength = 1.0)` | concept \| null | Activate a concept by label. |
+| `activate(word, strength = 1.0)` | concept \| null | Activate a concept by label. Returns `null` for a word the brain has never met. |
 | `learn(word, sensory = {}, emotion = {}, action = null, strength = 0.5)` | concept \| null | Teach a word a sensory profile and emotional vector. Also grounds it in the neural substrate. |
 | `associate(wordA, wordB, strength = 0.3)` | `EmotionVector \| null` | Link two concepts. |
 | `emotionOf(word)` | `EmotionVector \| null` | `{ valence, arousal, approach }` for a word. |
 | `activeConcepts(topN = 8)` | `ConceptSnapshot[]` | The most active concepts. |
 | `netEmotion()` | `EmotionVector` | The combined emotion of all active concepts. |
+
+A new brain has **no concepts at all**. `emotionOf('danger')` returns `null`
+until the world has told the brain what a danger is.
+
+### Grounding
+
+The layer that binds things in the world to concepts, and learns how they
+relate to one another.
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `ground(label, options = {})` | concept \| null | Bind a thing to a concept. `options` takes `features`, `valence`, `arousal`, `approach`, `strength`. |
+| `coOccur(labels, options = {})` | void | Record that things were perceived together. Repeated co-occurrence teaches the brain they are related. |
+| `relatedness(a, b)` | number | How strongly the brain considers two labels related, from `0` to `1`. |
+| `nearest(label, limit = 5)` | `{ label, strength }[]` | The labels most similar to the given one. |
+
+**Features are what make affect generalise.** Declare that a thing is hot
+and painful, and every later thing with the same features inherits that
+fear, even if the brain has never seen the label before:
+
+```js
+brain.ground('ember', {
+  features: ['hot', 'burning', 'orange'],
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('flame', { features: ['hot', 'burning', 'orange'] });
+
+brain.emotionOf('flame');  // { valence: -0.476, ... } - it fears flame
+```
+
+This is the difference between a brain with opinions and a brain with
+*learned* opinions. The brain does not know that "flame" is a word for
+fire. It knows that flame shares features with the thing that hurt.
+
+### Feature weights
+
+A feature that is shared by things that should not share an opinion needs
+a smaller say. "Grey" belongs to a wolf and to a pebble, but it should not
+carry the wolf's fear into the pebble.
+
+Give features as an object to weight them:
+
+```js
+brain.ground('wolf', {
+  features: { grey: 0.2, wild: 1.0, quadruped: 0.7 },
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('pebble', { features: { grey: 0.2, hard: 0.9 } });
+brain.ground('jackal', { features: { grey: 0.2, wild: 1.0 } });
+
+brain.emotionOf('pebble');  // near neutral - it only shares the weak feature
+brain.emotionOf('jackal');  // feared - it shares the strong one
+```
 
 ### Working memory
 
@@ -592,13 +732,14 @@ native and JS cores.
 | --- | --- |
 | `reward(strength = 1.0)` | number — the new dopamine level. |
 | `punish(strength = 1.0)` | number — the new dopamine level. |
-| `setNeeds(needs)` | `Needs` |
-| `getNeeds()` | `Needs` |
+| `setNeeds(needs)` | `Record<string, number>` — the drive values. Unknown names are ignored. |
+| `getNeeds()` | `Record<string, number>` — the value of each drive the body has. |
+| `defineDrives(schema)` | `string[]` — the names of every drive after the change. |
 | `getBody()` | `Body` |
 | `getMotorState()` | `MotorState` |
 | `move(dx = 0, dy = 0, intensity = 1.0)` | `Body` |
 | `integrateWorldState(state = {})` | `EmotionalState` |
-| `handleInteraction(kind, intensity = 1.0)` | `Needs` |
+| `handleInteraction(kind, intensity = 1.0)` | `Record<string, number>` |
 | `amygdalaActivate(threatLevel = 0.5)` | number |
 | `startle(strength = 1.0)` | void |
 | `decideBehavior(options = {})` | `BehaviorDecision` |
@@ -667,16 +808,106 @@ and `responseMode` (`'grounded'`, `'speak'`, or `'quiet'`).
 | Field | Type | Effect |
 | --- | --- | --- |
 | `body` | `{ x, y, heading, speed, vx, vy }` | Spatial neurons, border alarm, motion signal. |
-| `needs` | `{ hunger, energy, joy }` | Drive signals; low needs trigger distress and pain. |
-| `detections` | `[{ label, w }]` | Labels are hashed into visual neurons. Salient labels (`self`, `violet-glow`, `cyan-light`, `warm-glow`) also reward. |
-| `interaction` | `{ note, x, y, hungerLevel }` | `feed`, `poke`, `aversive`, `danger`, and `food` notes get special handling. |
+| `needs` | `{ [drive]: value }` | Drive values, by name. Only the drives the body declared. |
+| `detections` | `[{ label, w, valence?, arousal?, approach? }]` | Labels are hashed into visual neurons. Supplying affect tells the brain what the thing is worth. |
+| `interaction` | `{ note, label?, x, y, valence?, arousal?, approach?, intensity? }` | Affect, when supplied, replaces the built-in note handling. `label` is what the world calls the event, used to satisfy drives. |
 | `opticFlow` | `{ x, y, magnitude }` | Visual motion into the visual quadrant system. |
 | `motorHint` | `{ x, y, intensity, hintMode }` | A suggested direction, consumed by `selfAwareness()`. |
 
+**The affect channel is how you teach a brain about your world.** The
+brain has no built-in opinion about any label, so if you want it to fear
+something, you say so:
+
+```js
+brain.integrateWorldState({
+  detections: [
+    { label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8, approach: -1.0 },
+    { label: 'sheep', w: 0.6, valence: 0.7, arousal: 0.2, approach: 0.8 },
+  ],
+});
+```
+
+The same applies to interactions, which lets you use any vocabulary you
+like rather than the built-in one:
+
+```js
+brain.integrateWorldState({
+  interaction: { note: 'a bespoke user-defined event', valence: -0.8, arousal: 0.6 },
+});
+```
+
 ### `handleInteraction(kind, intensity = 1.0)`
 
-Recognised kinds: `feed`, `rest`, `play`, `poke`, `danger`. Anything else is
-treated as mildly aversive.
+If any declared drive says this event satisfies it, that drive is restored
+and the event is rewarding. Otherwise it is mildly aversive. There is no
+built-in vocabulary, so the world decides.
+
+---
+
+## Drives
+
+Homeostatic drives belong to the **body**, not to the brain. A brain that
+has been given no drives has none, and `setNeeds({ hunger: 0.2 })` on such
+a brain does nothing, because there is no hunger drive to set.
+
+Declare them when you build the brain:
+
+```js
+const brain = new Brain({
+  sizeGB: 0.05,
+  drives: {
+    fuel: {
+      decay: 0.01,        // how much it falls per tick
+      threshold: 0.3,     // below this it starts to hurt
+      critical: 0.1,      // below this it is an emergency
+      pain: 4.0,          // how loudly neglect is felt
+      signal: 1.0,        // how much it drives the hypothalamus
+      restore: 0.28,      // how much satisfying it restores
+      effort: 0.004,      // what movement costs it
+      satisfiedBy: ['diesel', 'charging-station'],
+    },
+    coolant: { satisfiedBy: 'coolant' },
+  },
+});
+```
+
+A list of names works too, if the defaults are fine:
+
+```js
+new Brain({ drives: ['fuel', 'coolant'] });
+```
+
+### What the brain does with them
+
+- Each drive decays on the simulation clock, at its own rate.
+- A drive below its threshold produces distress in its own sensory slot, so
+  the brain can tell *which* drive is hurting.
+- A drive below its critical threshold is an emergency: it activates the
+  amygdala and pushes valence down.
+- The most pressing drive pulls the motor system toward whatever last
+  satisfied it.
+- `satisfiedBy` decides what an event counts as. It is matched against the
+  interaction's `label`, or its `note` when no label is given.
+
+### Methods
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `defineDrives(schema)` | `string[]` | Declare more drives at runtime. |
+| `setNeeds(values)` | `Record<string, number>` | Set drive values. Unknown names are ignored. |
+| `getNeeds()` | `Record<string, number>` | The value of every drive. |
+
+### Satisfying a drive
+
+The world's own vocabulary is what satisfies a drive:
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'diesel', x: 0.8, y: 0.2, valence: 0.7 },
+});
+
+brain.getNeeds().fuel;  // restored
+```
 
 ---
 
@@ -715,6 +946,26 @@ Property: `size` (node count), `nodes` (the array).
 | `formatForLLM()` | string \| null |
 | `netEmotion()` | `EmotionVector` |
 | `prune()` | void |
+
+### `Grounding`
+
+```js
+const { Grounding } = require('neuropile');
+const grounding = new Grounding();
+```
+
+| Method | Returns |
+| --- | --- |
+| `observe(label, { features, valence, arousal, approach, strength })` | concept \| null |
+| `coOccur(labels, { strength })` | void |
+| `relatedness(a, b)` | number |
+| `affectOf(label)` | `EmotionVector \| null` |
+| `nearest(label, limit)` | `{ label, strength }[]` |
+| `emotionOf(label)` | `EmotionVector \| null` |
+| `tick()` | void — decays learned relations. |
+| `snapshot()` / `restore(snapshot)` | object / `this` |
+
+Property: `size` (concept count).
 
 ### `WorkingMemory`
 
@@ -849,10 +1100,140 @@ Copy-paste recipes for common tasks. Each one is complete and runnable.
 - [An HTTP service over a brain](#an-http-service-over-a-brain)
 - [A character that learns words](#a-character-that-learns-words)
 - [A character with opinions](#a-character-with-opinions)
+- [Teaching a brain about your world](#teaching-a-brain-about-your-world)
+- [Giving the body drives](#giving-the-body-drives)
 - [Growing a brain over time](#growing-a-brain-over-time)
 - [Persistent agents](#persistent-agents)
 - [Embedding in an existing app](#embedding-in-an-existing-app)
 - [Testing](#testing)
+
+---
+
+## Teaching a brain about your world
+
+A new brain has no opinions. It does not think `wolf` is frightening or
+`lamb` is tasty, because those are facts about the world, not about brains.
+You supply them.
+
+```js
+const { Brain } = require('neuropile');
+
+const brain = new Brain({ sizeGB: 0.05 });
+
+// Tell the brain what these things are worth, and what they feel like.
+// Features are given as a map so you can say how much each one counts.
+brain.ground('wolf', {
+  features: { grey: 0.2, wild: 1.0, quadruped: 0.7, howls: 0.9 },
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('lamb', {
+  features: { white: 0.2, tame: 1.0, quadruped: 0.7, bleats: 0.9 },
+  valence: 0.7, arousal: 0.2, approach: 0.8,
+});
+```
+
+The brain now has opinions. More usefully, it has opinions that
+**generalise**. The next animal you mention that shares features with the
+wolf is treated as dangerous too, even if you never said so:
+
+```js
+// The brain has never heard of "jackal", but it shares features with the
+// wolf, so it inherits the fear.
+brain.ground('jackal', { features: { grey: 0.2, wild: 1.0, quadruped: 0.7 } });
+
+brain.emotionOf('jackal');  // { valence: -0.18, ... }
+```
+
+That is the point of `features`. If you only ever taught the brain about
+words, it would only ever know about words. Teach it about features and it
+can apply what it learned to things it has never been told about.
+
+The weights matter. A pebble is also grey, but grey is a weak feature, so
+the wolf's fear barely reaches it:
+
+```js
+brain.ground('pebble', { features: { grey: 0.2, hard: 0.9 } });
+
+brain.emotionOf('pebble');  // near neutral
+```
+
+Relatedness is learned from things being seen together, not declared:
+
+```js
+// Wolves and sheep keep turning up in the same place.
+for (let i = 0; i < 10; i++) {
+  brain.ground('wolf', { features: { grey: 0.2, wild: 1.0 } });
+  brain.ground('sheep', { features: { white: 0.2, tame: 1.0 } });
+  brain.coOccur(['wolf', 'sheep']);
+}
+
+brain.relatedness('wolf', 'sheep');  // 1.0
+brain.relatedness('wolf', 'stone');  // 0.0
+```
+
+### Telling the brain what just happened
+
+The same principle applies to events. You do not need to use the built-in
+vocabulary:
+
+```js
+brain.integrateWorldState({
+  detections: [
+    { label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8, approach: -1.0 },
+    { label: 'lamb', w: 0.6, valence: 0.7, arousal: 0.2, approach: 0.8 },
+  ],
+  interaction: {
+    note: 'the wolf lunged',
+    valence: -0.8,
+    arousal: 0.9,
+  },
+});
+
+brain.tick(3);
+brain.emotionalState();  // the brain is now afraid
+```
+
+### Giving the body drives
+
+Drives belong to the body, so you declare them when you build the brain. A
+brain with no drives has no needs at all.
+
+```js
+const brain = new Brain({
+  sizeGB: 0.05,
+  drives: {
+    fuel: {
+      decay: 0.01,
+      threshold: 0.3,
+      critical: 0.1,
+      satisfiedBy: ['diesel', 'charging-station'],
+      effort: 0.004,   // movement costs fuel
+    },
+    coolant: {
+      decay: 0.005,
+      threshold: 0.4,
+      satisfiedBy: 'coolant',
+    },
+  },
+});
+
+console.log(brain.getNeeds());  // { fuel: 0.5, coolant: 0.5 }
+```
+
+The world satisfies them using its own vocabulary:
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'diesel', x: 0.8, y: 0.2, valence: 0.7 },
+});
+
+console.log(brain.getNeeds().fuel);  // restored
+```
+
+When fuel falls below its threshold the brain feels it, and when it falls
+below the critical threshold it is an emergency. The most pressing drive
+pulls the motor system toward wherever the satisfying thing was last seen.
 
 ---
 
@@ -1080,7 +1461,6 @@ independent sources. One unverified claim is not enough.
 ---
 
 ## Growing a brain over time
-
 ```js
 const brain = new Brain({
   startNeurons: 20000,
@@ -1193,6 +1573,8 @@ For fast tests, `neurons: 2000` is enough. For a realistic feel, `sizeGB:
 The behaviours that surprise people. Read this before debugging something that
 "should" have worked.
 
+- [A new brain knows nothing](#a-new-brain-knows-nothing)
+- [A new brain has no needs](#a-new-brain-has-no-needs)
 - [Growth numbers are not exact](#growth-numbers-are-not-exact)
 - [`hear()` also remembers](#hear-also-remembers)
 - [Memories do not decay on their own](#memories-do-not-decay-on-their-own)
@@ -1205,6 +1587,102 @@ The behaviours that surprise people. Read this before debugging something that
 - [Growth reallocates the whole engine](#growth-reallocates-the-whole-engine)
 - [The brain is stochastic without a seed](#the-brain-is-stochastic-without-a-seed)
 - [Typing is a string, not a number](#typing-is-a-string-not-a-number)
+- [Small inputs do not move the network](#small-inputs-do-not-move-the-network)
+
+---
+
+## A new brain knows nothing
+
+A brain that has experienced nothing has no concepts, no opinions, and no
+affect. This surprises people who expect "brain" to come pre-loaded.
+
+```js
+const brain = new Brain({ neurons: 5000 });
+
+brain.emotionOf('danger');  // null
+brain.emotionOf('safe');    // null
+brain.emotionOf('food');    // null
+```
+
+That is deliberate. Whether something is good or bad is a fact about the
+world the brain was put in, not a fact about brains, so the world supplies
+it. Two ways to do that:
+
+```js
+// Say what a thing is worth, and what it feels like.
+brain.ground('wolf', {
+  features: ['grey', 'wild'],
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+// Or say it as the brain perceives it.
+brain.integrateWorldState({
+  detections: [{ label: 'wolf', w: 0.9, valence: -0.9, arousal: 0.8 }],
+});
+```
+
+Because the affect attaches to the **features**, it transfers. Teach the
+brain that "hot, burning" hurts and it will fear anything else with those
+features, including words it has never seen.
+
+---
+
+## Small inputs do not move the network
+
+Perceiving a handful of neurons barely reaches the rest of the brain. A
+pattern needs to be rich enough to drive activity across regions, or
+nothing co-activates and nothing is learned.
+
+```js
+// Barely does anything.
+brain.perceive(new Uint32Array([1, 2, 3]));
+
+// Spreads through the network and starts learning.
+const pattern = new Uint32Array(200);
+for (let i = 0; i < pattern.length; i++) pattern[i] = (i * 7 + 3) % 400000;
+brain.perceive(pattern);
+```
+
+`hear()` and `remember()` already produce rich-enough patterns, so they are
+the easy path if you just want to watch the brain learn.
+
+---
+
+## A new brain has no needs
+
+Drives belong to the body, so a brain that was not given any has none.
+`getNeeds()` returns an empty object, and setting a drive the body does
+not have does nothing.
+
+```js
+const brain = new Brain({ neurons: 5000 });
+
+brain.getNeeds();            // {}
+brain.setNeeds({ hunger: 0.2 });
+brain.getNeeds();            // {} - there is no hunger drive
+```
+
+Declare them when you build the brain:
+
+```js
+const brain = new Brain({
+  neurons: 5000,
+  drives: {
+    hunger: { threshold: 0.4, satisfiedBy: ['feed'] },
+    energy: { threshold: 0.3, satisfiedBy: ['rest'] },
+  },
+});
+```
+
+The same rule applies to interactions: there is no built-in vocabulary. What
+satisfies a drive is whatever the schema says, matched against the
+interaction's `label` (or its `note` when there is no label).
+
+```js
+brain.integrateWorldState({
+  interaction: { label: 'feed', x: 0.5, y: 0.5, valence: 0.6 },
+});
+```
 
 ---
 
@@ -1546,8 +2024,11 @@ sensory / vision / audio
   BrainCore (C++ or JS)  ── spiking neurons, 16 regions, dopamine/NE
         │
         ├── emotionalState / behaviorState / motorIntent
+        ├── Drives              homeostatic drives, declared by the body
         │
         ├── MemoryCortex      associative, decaying, reafference-biased
+        ├── Grounding         binds world things to concepts; learns
+        │                    relatedness and feature-level affect
         ├── ConceptNet        sensory + emotional grounding of words
         ├── WorkingMemory     7 attention slots + shared focus
         ├── Genome            tunable personality/plasticity parameters
@@ -1567,6 +2048,13 @@ layers — the cognitive layers read back from it. `MemoryCortex.recall()` is
 biased by `core.reafference()`, and `Metacognition` writes its error signal
 back as dopamine through `core.reward()` / `core.punish()`. That feedback
 loop is what makes this a brain rather than a database with a mood.
+
+**The substrate learns by itself.** Hebbian plasticity runs on
+co-activation alone. Dopamine modulates the learning rate rather than
+gating it, so a brain that has merely watched the world has already changed,
+whether or not anyone scored the outcome. The co-activation window is
+measured in ticks, not wall-clock time, so learning does not depend on how
+fast the host happens to be running.
 
 ---
 
@@ -1732,17 +2220,42 @@ Derived from the three affect numbers plus regional activity.
 
 ## Needs and the body
 
-Three needs, each 0..1: `hunger`, `energy`, `joy`.
-
-They start at 0.5 and drift down. Low needs generate distress signals in the
-hypothalamus, and hunger below 0.4 produces pain signals and an amygdala
-response.
+Drives are declared by the body, not by the brain. A body made of flesh
+gets hungry and tired; a rover gets low on fuel and overheats. Which
+drives exist, how fast they decay, when they start to hurt, and what
+satisfies them are all facts about the body.
 
 ```js
-brain.getNeeds();          // { hunger, energy, joy }
-brain.setNeeds({ hunger: 0.2 });
-brain.handleInteraction('feed', 1.0);  // reduces hunger, rewards
+new Brain({
+  drives: {
+    fuel: {
+      decay: 0.01,
+      threshold: 0.3,      // below this it starts to hurt
+      critical: 0.1,       // below this it is an emergency
+      effort: 0.004,       // what movement costs it
+      satisfiedBy: ['diesel', 'charging-station'],
+    },
+  },
+});
 ```
+
+A brain with no drives declared has none, and `setNeeds({ hunger: 0.2 })`
+does nothing, because there is no hunger drive to set.
+
+Each drive starts at 0.5 and drifts down at its own rate. A drive below
+its threshold produces distress in its own sensory slot, so the brain can
+tell *which* drive is hurting. Below the critical threshold it is an
+emergency: the amygdala responds and valence falls. The most pressing
+drive pulls the motor system toward whatever last satisfied it.
+
+```js
+brain.getNeeds();          // { fuel: 0.42 }
+brain.setNeeds({ fuel: 0.2 });
+brain.integrateWorldState({ interaction: { label: 'diesel' } });
+```
+
+Because the vocabulary comes from the schema, a world can use any words it
+likes. There is no built-in notion of food.
 
 The body is a position in a unit square, plus heading, speed, and energy.
 
@@ -1750,9 +2263,9 @@ The body is a position in a unit square, plus heading, speed, and energy.
 brain.getBody(); // { x, y, heading, speed, energy }
 ```
 
-`integrateWorldState()` reads the body and needs and turns them into neural
-signals: spatial position relative to centre, distance from the border,
-motion, and need pressure.
+`integrateWorldState()` reads the body and the drives and turns them into
+neural signals: spatial position relative to centre, distance from the
+border, motion, and drive pressure.
 
 ---
 
@@ -1850,6 +2363,43 @@ recalled. `activeConcepts()` returns the strongest ones.
 
 `netEmotion()` sums the emotion of all active concepts, which is how a
 character's overall mood shifts toward whatever it has been thinking about.
+
+**There are no seeded concepts.** A brain that has experienced nothing has
+no opinions, not even about "good" and "bad". Whether a thing is pleasant
+is a fact about the world, and the world supplies it.
+
+---
+
+## Grounding
+
+Grounding is the layer that makes the brain's opinions *transferable*.
+
+```js
+brain.ground('ember', {
+  features: ['hot', 'burning', 'orange'],
+  valence: -0.9, arousal: 0.8, approach: -1.0,
+});
+
+brain.ground('flame', { features: ['hot', 'burning', 'orange'] });
+brain.emotionOf('flame');  // negative - it inherits the fear
+```
+
+Three things happen here.
+
+**Features carry affect.** When the environment declares that something is
+painful, that affect is recorded against the thing *and* against its
+features. Later, a label that shares those features inherits the affect
+even though the brain has never seen it. This is what lets the brain
+generalise instead of memorising.
+
+**Co-occurrence creates relations.** Two things seen together repeatedly
+become associated, and the association decays over time like any other
+trace. The brain learns that a kitten is like a cat by seeing them in the
+same context, not by knowing the words.
+
+**Labels are bound to referents.** A detection in the world is bound to a
+concept, so the label stops being a string and becomes the thing that was
+there.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "neuropile",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A native C++ spiking-neuron brain core with a Node.js API. Regions, neuromodulators, needs, emotion, motor intent, memory, concepts, and neurogenesis - plug a growing brain into anything.",
   "keywords": [
     "brain",

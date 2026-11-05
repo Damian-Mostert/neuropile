@@ -1,4 +1,4 @@
-# neuropile v0.1.1 - full documentation
+# neuropile v0.1.2 - full documentation
 
 > Complete documentation for the neuropile package, concatenated into a
 > single file. This is the "llmsFull" target for agents that want everything

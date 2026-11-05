@@ -30,7 +30,6 @@ JavaScript.
 - [API reference](#api-reference)
 - [Performance](#performance)
 - [Environment variables](#environment-variables)
-- [Migrating from `talos-brain`](#migrating-from-talos-brain)
 - [Development](#development)
 - [License](#license)
 
@@ -683,33 +682,6 @@ Run `npm run benchmark` to measure it on your own machine. It takes
 
 ---
 
-## Migrating from `talos-brain`
-
-The package was previously published as `talos-brain`. It is now `neuropile`.
-
-- `npm install neuropile` — the new name.
-- `require('neuropile')` / `import { Brain } from 'neuropile'`.
-- Existing `talos-brain` snapshots still load: the persistence layer reads the
-  old `talos-brain` format and the old `__talosType` value tag.
-- `require('neuropile/talos-brain')` resolves to the same entry point if you
-  need the old specifier to keep working inside a monorepo.
-
-Environment variables were renamed alongside the package. The old names still
-work:
-
-| New | Old |
-| --- | --- |
-| `NEUROPILE_NATIVE` | `TALOS_NATIVE` |
-| `NEUROPILE_SIZE_GB` | `TALOS_SIZE_GB` |
-| `NEUROPILE_MEMORY_CAPACITY` | `TALOS_MEMORY_CAPACITY` |
-| `NEUROPILE_STEPS` | `TALOS_STEPS` |
-| `NEUROPILE_HZ` | `TALOS_HZ` |
-| `NEUROPILE_ROUNDS` | `TALOS_ROUNDS` |
-| `NEUROPILE_START` | `TALOS_START` |
-| `NEUROPILE_MAX` | `TALOS_MAX` |
-
----
-
 ## Development
 
 ```bash
@@ -758,14 +730,3 @@ MIT © 2026 Damian Mostert
 See [LICENSE](./LICENSE).
 
 ---
-
-## Credits
-
-`neuropile` is a native C++ port of the neural substrate and cognitive layers
-from the [Talos project](https://github.com/Damian-Mostert/Talos-website),
-which lives in the `core/` directory of that repository. The region table,
-wiring topology, and affect formulas are faithful ports; the C++ core, the
-neurogenesis system, and the Node.js packaging are new work.
-
-The `soundPattern` hash matches the original `core/boot.js` exactly, so brains
-stay compatible with Talos-encoded stimuli.
